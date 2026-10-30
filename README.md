@@ -142,7 +142,7 @@ Requires JDK 17 and the Android SDK (command-line tools are enough).
 
 Fork it, improve it, send pull requests, or take the ideas to the [Home Assistant Companion app](https://github.com/home-assistant/android). Things I'd like next:
 
-- **Phone actions:** "take me to Target on Southport Road" → Google Maps navigation; "play my driving playlist on Spotify"; timers — handled on the phone, no Home Assistant round trip.
+- **Phone actions:** "take me to Target on Main Street" → Google Maps navigation; "play my driving playlist on Spotify"; timers — handled on the phone, no Home Assistant round trip.
 - Models downloaded on first launch instead of bundled (smaller APK).
 - More languages (the models are English-only today).
 
