@@ -1,0 +1,124 @@
+package com.havoice.assistant
+
+import android.content.Context
+
+/** The Home Assistant connection details, saved privately on the phone. */
+class HaSettings(context: Context) {
+    private val prefs = context.getSharedPreferences("ha_connection", Context.MODE_PRIVATE)
+
+    var baseUrl: String
+        get() = prefs.getString("base_url", "").orEmpty()
+        set(value) = prefs.edit().putString("base_url", value.trim().trimEnd('/')).apply()
+
+    var token: String
+        get() = prefs.getString("token", "").orEmpty()
+        set(value) = prefs.edit().putString("token", value.trim()).apply()
+
+    /** Assist pipeline to use; null means Home Assistant's preferred pipeline. */
+    var pipelineId: String?
+        get() = prefs.getString("pipeline_id", null)
+        set(value) = prefs.edit().putString("pipeline_id", value).apply()
+
+    /** Start listening as soon as the sheet opens, and keep listening for follow-up questions. */
+    var handsFree: Boolean
+        get() = prefs.getBoolean("hands_free", true)
+        set(value) = prefs.edit().putBoolean("hands_free", value).apply()
+
+    var noiseReduction: NoiseReduction
+        get() = prefs.getString("noise_reduction", null)
+            ?.let { saved -> NoiseReduction.entries.firstOrNull { it.name == saved } }
+            ?: NoiseReduction.STRONG
+        set(value) = prefs.edit().putString("noise_reduction", value.name).apply()
+
+    /** Only act on phrases in the owner's voice (needs a voiceprint from setup). */
+    var voiceIdEnabled: Boolean
+        get() = prefs.getBoolean("voice_id_enabled", true)
+        set(value) = prefs.edit().putBoolean("voice_id_enabled", value).apply()
+
+    /** How closely a phrase must match the voiceprint to count as the owner (0–1). */
+    var voiceIdThreshold: Float
+        // "_v3": strictness chosen for the TitaNet model; earlier settings were for CAM++.
+        get() = prefs.getFloat("voice_id_threshold_v3", VoiceProfile.DEFAULT_THRESHOLD)
+        set(value) = prefs.edit().putFloat("voice_id_threshold_v3", value).apply()
+
+    /** Keep recordings of listening sessions and voice tests on the phone for tuning. */
+    var saveRecordings: Boolean
+        get() = prefs.getBoolean("save_recordings", false)
+        set(value) = prefs.edit().putBoolean("save_recordings", value).apply()
+
+    /** Silence (seconds) after a finished-sounding sentence before the command is sent. */
+    var endPauseSeconds: Float
+        get() = prefs.getFloat("end_pause_seconds", 1.2f)
+        set(value) = prefs.edit().putFloat("end_pause_seconds", value).apply()
+
+    /** Lines of "heard => meant" corrections applied to what was heard before it's sent. */
+    var wordFixes: String
+        get() = prefs.getString("word_fixes", null).orEmpty()
+        set(value) = prefs.edit().putString("word_fixes", value).apply()
+
+    /** The AI Task entity that describes attached photos; found automatically when blank. */
+    var aiTaskEntity: String
+        get() = prefs.getString("ai_task_entity", null).orEmpty()
+        set(value) = prefs.edit().putString("ai_task_entity", value.trim()).apply()
+
+    // Wake words.
+    var wakeEnabled: Boolean
+        get() = prefs.getBoolean("wake_enabled", false)
+        set(value) = prefs.edit().putBoolean("wake_enabled", value).apply()
+
+    /** JSON list of tuned wake phrases; see [WakeWords]. */
+    var wakePhrasesJson: String
+        get() = prefs.getString("wake_phrases", null) ?: """[{"text":"hey jarvis","threshold":0.25}]"""
+        set(value) = prefs.edit().putString("wake_phrases", value).apply()
+
+    /** Only wake up when the wake phrase is said in the owner's voice. */
+    var wakeOnlyMyVoice: Boolean
+        get() = prefs.getBoolean("wake_only_my_voice", true)
+        set(value) = prefs.edit().putBoolean("wake_only_my_voice", value).apply()
+
+    /** Answer the wake phrase while the phone is locked. */
+    var wakeWhenLocked: Boolean
+        get() = prefs.getBoolean("wake_when_locked", false)
+        set(value) = prefs.edit().putBoolean("wake_when_locked", value).apply()
+
+    /** Stop listening after the phone sits still for [wakeStillMinutes]; resume when it moves. */
+    var wakeSleepWhenStill: Boolean
+        get() = prefs.getBoolean("wake_sleep_when_still", false)
+        set(value) = prefs.edit().putBoolean("wake_sleep_when_still", value).apply()
+
+    /**
+     * 0 (only clear, deliberate wake phrases) to 1 (catches quiet ones, more false wakes); 0.5 = as
+     * tuned. Defaults to the looser side: voice ID still turns away other voices.
+     */
+    var wakeSensitivity: Float
+        get() = prefs.getFloat("wake_sensitivity", 0.75f)
+        set(value) = prefs.edit().putFloat("wake_sensitivity", value).apply()
+
+    var wakeStillMinutes: Int
+        get() = prefs.getInt("wake_still_minutes", 25)
+        set(value) = prefs.edit().putInt("wake_still_minutes", value).apply()
+
+    // Spoken PIN while locked; see [PinLock]. Only a salted hash of the PIN is stored.
+    var pinRequiredWhenLocked: Boolean
+        get() = prefs.getBoolean("pin_required_when_locked", false)
+        set(value) = prefs.edit().putBoolean("pin_required_when_locked", value).apply()
+
+    var pinHash: String
+        get() = prefs.getString("pin_hash", null).orEmpty()
+        set(value) = prefs.edit().putString("pin_hash", value).apply()
+
+    var pinSalt: String
+        get() = prefs.getString("pin_salt", null).orEmpty()
+        set(value) = prefs.edit().putString("pin_salt", value).apply()
+
+    var pinFailures: Int
+        get() = prefs.getInt("pin_failures", 0)
+        set(value) = prefs.edit().putInt("pin_failures", value).apply()
+
+    var pinLockedUntil: Long
+        get() = prefs.getLong("pin_locked_until", 0)
+        set(value) = prefs.edit().putLong("pin_locked_until", value).apply()
+
+    val isConfigured: Boolean
+        get() = baseUrl.isNotBlank() && token.isNotBlank()
+}

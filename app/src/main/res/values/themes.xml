@@ -1,0 +1,13 @@
+<resources>
+    <style name="Theme.HaVoice" parent="android:Theme.Material.NoActionBar" />
+
+    <!-- Transparent window so the Assist sheet floats over whatever app is open;
+         the sheet draws its own dimmed backdrop and slide-in animation. -->
+    <style name="Theme.HaVoice.Overlay" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:backgroundDimEnabled">false</item>
+        <item name="android:windowAnimationStyle">@null</item>
+    </style>
+</resources>

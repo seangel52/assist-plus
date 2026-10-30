@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Where the camera saves photos taken from the Assist sheet. -->
+<paths>
+    <cache-path name="camera" path="camera/" />
+</paths>

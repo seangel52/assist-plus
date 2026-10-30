@@ -1,0 +1,296 @@
+package com.havoice.assistant
+
+import android.annotation.SuppressLint
+import android.content.Context
+import android.media.AudioFormat
+import android.media.AudioRecord
+import android.media.MediaRecorder
+import com.k2fsa.sherpa.onnx.FeatureConfig
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.withContext
+import com.k2fsa.sherpa.onnx.KeywordSpotter
+import com.k2fsa.sherpa.onnx.KeywordSpotterConfig
+import com.k2fsa.sherpa.onnx.OnlineModelConfig
+import com.k2fsa.sherpa.onnx.OnlineTransducerModelConfig
+import org.json.JSONArray
+import org.json.JSONObject
+
+/**
+ * A wake phrase and how it was tuned from the owner's recordings.
+ * [threshold]: the spotter's trigger threshold (lower = triggers more easily).
+ * [voiceMin]: the lowest voice ID score accepted for this phrase, or null if not recorded.
+ */
+data class WakePhrase(val text: String, val threshold: Float = DEFAULT_THRESHOLD, val voiceMin: Float? = null) {
+    companion object {
+        const val DEFAULT_THRESHOLD = 0.25f
+    }
+}
+
+/** Custom wake phrases: storing them, turning them into the spotter's format, and tuning them. */
+object WakeWords {
+    // How strongly the spotter favours the owner's phrases over other speech. Tuning showed
+    // 1.5 made people raise their voice; 2.0 catches normal speech.
+    private const val BOOST = 2.0f
+    private const val LOWEST_THRESHOLD = 0.05f
+
+    fun load(settings: HaSettings): List<WakePhrase> {
+        val array = try {
+            JSONArray(settings.wakePhrasesJson)
+        } catch (e: Exception) {
+            JSONArray()
+        }
+        return (0 until array.length()).map { i ->
+            val o = array.getJSONObject(i)
+            WakePhrase(
+                text = o.getString("text"),
+                threshold = o.optDouble("threshold", WakePhrase.DEFAULT_THRESHOLD.toDouble()).toFloat(),
+                voiceMin = if (o.has("voiceMin")) o.getDouble("voiceMin").toFloat() else null,
+            )
+        }
+    }
+
+    fun save(settings: HaSettings, phrases: List<WakePhrase>) {
+        settings.wakePhrasesJson = JSONArray(
+            phrases.map { p ->
+                JSONObject().put("text", p.text).put("threshold", p.threshold.toDouble()).apply {
+                    p.voiceMin?.let { put("voiceMin", it.toDouble()) }
+                }
+            },
+        ).toString()
+    }
+
+    /**
+     * The spotter's keyword list: "▁HE Y ▁JA R VI S :2.0 #0.25 @0/…", one entry per phrase,
+     * labelled by index. [sensitivity] (0–1, 0.5 = as tuned) shifts every threshold by up to ±0.1.
+     */
+    fun spec(context: Context, phrases: List<WakePhrase>, sensitivity: Float = 0.5f): String =
+        phrases.mapIndexedNotNull { i, p ->
+            val tokens = WakeTokenizer.get(context).encode(p.text)
+            val threshold = (p.threshold + (0.5f - sensitivity) * 0.2f).coerceIn(LOWEST_THRESHOLD, 0.9f)
+            if (tokens.isEmpty()) null else "${tokens.joinToString(" ")} :$BOOST #${"%.2f".format(java.util.Locale.US, threshold)} @$i"
+        }.joinToString("/")
+
+    /**
+     * Listens until one of [phrases] is heard and returns it with the last 2 s of audio (to
+     * check whose voice said it), or null if the model isn't available. Caller holds RECORD_AUDIO;
+     * cancel the coroutine to stop. [onTick] runs about every 40 ms.
+     */
+    @SuppressLint("MissingPermission")
+    suspend fun awaitWake(
+        context: Context,
+        phrases: List<WakePhrase>,
+        sensitivity: Float,
+        onTick: () -> Unit = {},
+    ): Pair<WakePhrase, FloatArray>? = withContext(Dispatchers.IO) {
+        val spotter = WakeSpotter.get(context)?.spotter ?: return@withContext null
+        val spec = spec(context, phrases, sensitivity)
+        if (spec.isEmpty()) return@withContext null
+        val rate = MicRecorder.SAMPLE_RATE
+        val chunk = MicRecorder.CHUNK_BYTES
+        val record = AudioRecord(
+            MediaRecorder.AudioSource.VOICE_RECOGNITION,
+            rate,
+            AudioFormat.CHANNEL_IN_MONO,
+            AudioFormat.ENCODING_PCM_16BIT,
+            maxOf(AudioRecord.getMinBufferSize(rate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT), chunk * 4),
+        )
+        val stream = spotter.createStream(spec)
+        val recent = FloatArray(rate * 2)
+        var recentPos = 0
+        try {
+            record.startRecording()
+            val buffer = ByteArray(chunk)
+            while (isActive) {
+                val read = record.read(buffer, 0, buffer.size)
+                if (read <= 0) continue
+                val samples = VoiceProfile.toFloats(buffer.copyOf(read))
+                for (s in samples) {
+                    recent[recentPos] = s
+                    recentPos = (recentPos + 1) % recent.size
+                }
+                stream.acceptWaveform(samples, rate)
+                while (spotter.isReady(stream)) {
+                    spotter.decode(stream)
+                    val label = spotter.getResult(stream).keyword
+                    if (label.isNotEmpty()) {
+                        val phrase = phrases.getOrNull(label.toIntOrNull() ?: -1) ?: continue
+                        return@withContext phrase to (recent.copyOfRange(recentPos, recent.size) + recent.copyOfRange(0, recentPos))
+                    }
+                }
+                onTick()
+            }
+            null
+        } finally {
+            stream.release()
+            record.stop()
+            record.release()
+        }
+    }
+
+    /**
+     * Whether [audio] (around a detected wake phrase) could be the owner's voice, when "only wake
+     * for my voice" is on. Returns the verdict and the score (null when not checked).
+     *
+     * A wake phrase is under a second of speech, too little for a firm voice check: the owner's
+     * scored 0.23–0.56 where a TV or video scores about 0–0.16. So only clearly-other voices are
+     * turned away here; the request that follows gets the full voice check anyway.
+     */
+    fun voiceMatches(context: Context, settings: HaSettings, phrase: WakePhrase, audio: FloatArray): Pair<Boolean, Float?> {
+        val profile = if (settings.wakeOnlyMyVoice && settings.voiceIdEnabled) VoiceProfile.load(context) else null
+        profile ?: return true to null
+        val engines = SpeechEngines.get(context) ?: return true to null
+        val score = VoiceProfile.score(engines, profile, VoiceProfile.speechOnly(engines, audio)) ?: 0f
+        val needed = minOf(phrase.voiceMin ?: WAKE_VOICE_MIN, WAKE_VOICE_MIN)
+        return (score >= needed) to score
+    }
+
+    // In noisy rooms the owner's wake phrase has scored as low as 0.23.
+    private const val WAKE_VOICE_MIN = 0.15f
+
+    /**
+     * Tunes a phrase from the owner saying it several times: picks the strictest trigger
+     * threshold that still catches all but one recording (fewer false wake-ups), and the
+     * lowest voice ID score seen (minus a margin) for the voice check.
+     * Returns the tuned phrase and how many recordings it caught.
+     */
+    fun tune(context: Context, phrase: String, clips: List<FloatArray>, profile: FloatArray?): Pair<WakePhrase, Int> {
+        val spotter = WakeSpotter.get(context) ?: throw HaException("Couldn't load the wake word model")
+        val tokens = WakeTokenizer.get(context).encode(phrase)
+        if (tokens.isEmpty()) throw HaException("Type a wake phrase first")
+        val needed = maxOf(1, clips.size - 1)
+        var chosen = LOWEST_THRESHOLD
+        var caught = 0
+        for (t in listOf(0.50f, 0.45f, 0.40f, 0.35f, 0.30f, 0.25f, 0.20f, 0.15f, 0.10f, 0.05f)) {
+            val hits = clips.count { spotter.detects(it, "${tokens.joinToString(" ")} :$BOOST #${"%.2f".format(java.util.Locale.US, t)} @0") }
+            if (hits >= needed) {
+                chosen = t
+                caught = hits
+                break
+            }
+            caught = maxOf(caught, hits)
+        }
+        val voiceMin = profile?.let { owner ->
+            val engines = SpeechEngines.get(context) ?: return@let null
+            clips.mapNotNull { VoiceProfile.score(engines, owner, VoiceProfile.speechOnly(engines, it)) }
+                .minOrNull()?.let { maxOf(0.15f, it - 0.10f) }
+        }
+        val tuned = WakePhrase(phrase, threshold = maxOf(LOWEST_THRESHOLD, chosen - 0.05f), voiceMin = voiceMin)
+        AppLog.i(
+            "Wake phrase \"$phrase\" tuned: ${clips.size} recordings, caught $caught, threshold %.2f, voice min %s"
+                .format(tuned.threshold, voiceMin?.let { "%.2f".format(it) } ?: "-"),
+        )
+        return tuned to caught
+    }
+}
+
+/** The keyword spotter model (English, 3.3M parameters), loaded once. */
+class WakeSpotter private constructor(val spotter: KeywordSpotter) {
+    /** Whether [samples] contain the keyword in [spec], using a fresh stream. */
+    fun detects(samples: FloatArray, spec: String): Boolean {
+        val stream = spotter.createStream(spec)
+        try {
+            for (start in samples.indices step CHUNK) {
+                stream.acceptWaveform(samples.copyOfRange(start, minOf(samples.size, start + CHUNK)), MicRecorder.SAMPLE_RATE)
+                while (spotter.isReady(stream)) {
+                    spotter.decode(stream)
+                    if (spotter.getResult(stream).keyword.isNotEmpty()) return true
+                }
+            }
+            // Trailing silence lets the spotter finish a phrase said right at the end.
+            stream.acceptWaveform(FloatArray(MicRecorder.SAMPLE_RATE / 2), MicRecorder.SAMPLE_RATE)
+            stream.inputFinished()
+            while (spotter.isReady(stream)) {
+                spotter.decode(stream)
+                if (spotter.getResult(stream).keyword.isNotEmpty()) return true
+            }
+            return false
+        } finally {
+            stream.release()
+        }
+    }
+
+    companion object {
+        private const val CHUNK = MicRecorder.SAMPLE_RATE / 25
+
+        @Volatile
+        private var loaded: WakeSpotter? = null
+
+        @Synchronized
+        fun get(context: Context): WakeSpotter? {
+            loaded?.let { return it }
+            return try {
+                val spotter = KeywordSpotter(
+                    assetManager = context.applicationContext.assets,
+                    config = KeywordSpotterConfig(
+                        featConfig = FeatureConfig(sampleRate = MicRecorder.SAMPLE_RATE, featureDim = 80),
+                        modelConfig = OnlineModelConfig(
+                            transducer = OnlineTransducerModelConfig(
+                                encoder = "kws/encoder.int8.onnx",
+                                decoder = "kws/decoder.int8.onnx",
+                                joiner = "kws/joiner.int8.onnx",
+                            ),
+                            tokens = "kws/tokens.txt",
+                            modelType = "zipformer2",
+                            numThreads = 1,
+                        ),
+                        // A placeholder that never fires; the real phrases come per stream.
+                        keywordsFile = "kws/keywords.txt",
+                    ),
+                )
+                WakeSpotter(spotter).also { loaded = it }
+            } catch (e: Exception) {
+                AppLog.e("Couldn't load the wake word model", e)
+                null
+            }
+        }
+    }
+}
+
+/**
+ * Splits a typed phrase into the spotter's word pieces the way its SentencePiece (unigram)
+ * tokenizer does: per word, the split of "▁WORD" with the highest total piece score.
+ * Checked against SentencePiece itself on a set of sample phrases.
+ */
+class WakeTokenizer private constructor(private val scores: Map<String, Float>) {
+    fun encode(text: String): List<String> =
+        text.uppercase().replace(Regex("[^A-Z' ]"), " ").split(' ').filter { it.isNotBlank() }.flatMap { word ->
+            val s = "▁$word"
+            val bestScore = FloatArray(s.length + 1) { if (it == 0) 0f else Float.NEGATIVE_INFINITY }
+            val bestFrom = IntArray(s.length + 1) { -1 }
+            for (end in 1..s.length) {
+                for (start in maxOf(0, end - MAX_PIECE)..<end) {
+                    if (bestScore[start] == Float.NEGATIVE_INFINITY) continue
+                    val score = scores[s.substring(start, end)] ?: if (end - start == 1) UNKNOWN_SCORE else continue
+                    if (bestScore[start] + score > bestScore[end]) {
+                        bestScore[end] = bestScore[start] + score
+                        bestFrom[end] = start
+                    }
+                }
+            }
+            val pieces = ArrayDeque<String>()
+            var end = s.length
+            while (end > 0) {
+                val start = bestFrom[end]
+                pieces.addFirst(s.substring(start, end))
+                end = start
+            }
+            pieces
+        }
+
+    companion object {
+        private const val MAX_PIECE = 16
+        private const val UNKNOWN_SCORE = -100f
+
+        @Volatile
+        private var loaded: WakeTokenizer? = null
+
+        @Synchronized
+        fun get(context: Context): WakeTokenizer = loaded ?: WakeTokenizer(
+            context.assets.open("kws/vocab.txt").bufferedReader().readLines().mapNotNull { line ->
+                val tab = line.lastIndexOf('\t')
+                if (tab <= 0) null else line.substring(0, tab) to (line.substring(tab + 1).toFloatOrNull() ?: return@mapNotNull null)
+            }.toMap(),
+        ).also { loaded = it }
+    }
+}

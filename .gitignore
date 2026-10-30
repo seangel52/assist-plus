@@ -1,0 +1,29 @@
+# Build output and local machine settings
+.gradle/
+build/
+app/build/
+app/release/
+local.properties
+.idea/
+*.iml
+captures/
+.kotlin/
+
+# Release signing: the key and its passwords never go in the repository
+keystore.properties
+*.jks
+*.keystore
+
+# Downloaded by scripts/download-models.sh (too large for git, and fetched from their publishers)
+app/libs/*.aar
+app/src/main/assets/denoise/
+app/src/main/assets/vad/
+app/src/main/assets/final/
+app/src/main/assets/speaker/
+app/src/main/assets/voxlock/
+app/src/main/assets/kws/*.onnx
+app/src/main/assets/kws/tokens.txt
+
+# Personal: local tools, notes and backups
+.venv/
+ha-backups/
