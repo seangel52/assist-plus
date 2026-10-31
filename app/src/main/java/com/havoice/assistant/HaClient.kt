@@ -165,6 +165,14 @@ class HaClient(baseUrl: String, private val token: String) {
     }
 
     /** Like [awaitResult], for commands whose result is a list. */
+    /** The home's latitude and longitude from Home Assistant's general settings. */
+    suspend fun homeLocation(): Pair<Double, Double>? = timed(10_000, "the home location") {
+        val config = awaitResult(sendCommand(JSONObject().put("type", "get_config")))
+        val latitude = config.optDouble("latitude")
+        val longitude = config.optDouble("longitude")
+        if (latitude.isNaN() || longitude.isNaN() || (latitude == 0.0 && longitude == 0.0)) null else latitude to longitude
+    }
+
     private suspend fun awaitListResult(id: Int): JSONArray {
         while (true) {
             val message = receive()

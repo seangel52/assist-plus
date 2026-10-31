@@ -14,8 +14,8 @@ android {
         applicationId = "com.havoice.assistant"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 2
+        versionName = "0.2.0"
 
         // Modern phones (including the Galaxy S25) are 64-bit ARM; skipping the other
         // CPU types keeps the speech engine from tripling the app size.
@@ -88,4 +88,6 @@ dependencies {
     // final speech recognition, speaker ID. Release AAR from github.com/k2-fsa/sherpa-onnx.
     // v2.0.1 is needed for VoxLock; v1.13.8 was the last version before it.
     implementation(files("libs/sherpa-onnx-2.0.1.aar"))
+
+    testImplementation("junit:junit:4.13.2")
 }

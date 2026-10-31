@@ -334,10 +334,14 @@ class WakeWordService : Service(), SensorEventListener {
     }
 }
 
-/** After a phone restart Android won't let a microphone service start by itself; offer a one-tap restart. */
+/**
+ * After a phone restart or an app update, Android won't let a microphone service start by
+ * itself; offer a one-tap restart.
+ */
 class BootReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
-        if (intent.action != Intent.ACTION_BOOT_COMPLETED || !HaSettings(context).wakeEnabled) return
+        val restarted = intent.action == Intent.ACTION_BOOT_COMPLETED || intent.action == Intent.ACTION_MY_PACKAGE_REPLACED
+        if (!restarted || !HaSettings(context).wakeEnabled) return
         WakeWordService.offerRestart(context)
     }
 }

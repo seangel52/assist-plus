@@ -24,6 +24,17 @@ class HaSettings(context: Context) {
         get() = prefs.getBoolean("hands_free", true)
         set(value) = prefs.edit().putBoolean("hands_free", value).apply()
 
+    /** Navigation, music and timers handled on the phone instead of by Home Assistant. */
+    var phoneActions: Boolean
+        get() = prefs.getBoolean("phone_actions", true)
+        set(value) = prefs.edit().putBoolean("phone_actions", value).apply()
+
+    var navigationApp: NavigationApp
+        get() = prefs.getString("navigation_app", null)
+            ?.let { saved -> NavigationApp.entries.firstOrNull { it.name == saved } }
+            ?: NavigationApp.GOOGLE_MAPS
+        set(value) = prefs.edit().putString("navigation_app", value.name).apply()
+
     var noiseReduction: NoiseReduction
         get() = prefs.getString("noise_reduction", null)
             ?.let { saved -> NoiseReduction.entries.firstOrNull { it.name == saved } }

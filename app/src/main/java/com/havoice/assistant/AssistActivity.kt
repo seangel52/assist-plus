@@ -1,6 +1,7 @@
 package com.havoice.assistant
 
 import android.Manifest
+import android.app.KeyguardManager
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.media.AudioAttributes
@@ -110,6 +111,7 @@ import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 data class AssistMessage(
@@ -395,6 +397,16 @@ class AssistActivity : ComponentActivity() {
         /** Set (to the phrase heard) when the wake word listener opened the sheet. */
         const val EXTRA_FROM_WAKE_WORD = "from_wake_word"
         const val EXTRA_WAKE_TOKEN = "wake_token"
+
+        // Answers to "Did you mean …?" about an address.
+        private val YES_WORDS = setOf(
+            "yes", "yeah", "yep", "yup", "correct", "right", "sure", "ok", "okay", "that's", "thats", "it",
+            "go", "do", "please", "exactly", "perfect", "that", "one", "the", "is", "sounds", "good",
+        )
+        private val NO_WORDS = setOf("no", "nope", "nah", "wrong", "incorrect", "not", "that", "that's", "thats", "one", "the", "is", "it")
+
+        // Asks about an address at most this many times, then lets the maps app search for it.
+        private const val MAX_ADDRESS_TRIES = 3
     }
 
     private fun loadPipelines() {
@@ -544,6 +556,15 @@ class AssistActivity : ComponentActivity() {
             return
         }
         messages += AssistMessage(inputBubble(text), isInput = true)
+        pendingNavigation?.let { pending ->
+            pendingNavigation = null
+            if (exit == ExitWords.Kind.GOODBYE) finish() else lifecycleScope.launch { answerAboutAddress(pending, text) }
+            return
+        }
+        phoneAction(text)?.let { action ->
+            lifecycleScope.launch { runPhoneAction(action, text) }
+            return
+        }
         messages += AssistMessage("", isInput = false, isPlaceholder = true)
         val replyIndex = messages.lastIndex
         busy = true
@@ -571,6 +592,159 @@ class AssistActivity : ComponentActivity() {
                 kotlinx.coroutines.delay(1500)
                 finish()
             }
+        }
+    }
+
+    private fun phoneAction(text: String): PhoneAction? =
+        if (settings.phoneActions && attachments.isEmpty()) PhoneActions.parse(text, settings.navigationApp) else null
+
+    /**
+     * Does [action] on the phone instead of asking Home Assistant, then closes Assist if it worked.
+     * A street address is looked up first; returns true when that needs a question answered.
+     * [confirmed]: the address was already settled, and this is what to say.
+     */
+    private suspend fun runPhoneAction(
+        action: PhoneAction,
+        request: String,
+        confirmed: String? = null,
+        attempt: Int = 1,
+    ): Boolean {
+        AppLog.i("Phone action for ${quote(request)}: $action")
+        var todo = action
+        var saying = confirmed
+        if (action is PhoneAction.Navigate && confirmed == null && AddressCheck.needsCheck(action.place)) {
+            val result = AddressCheck.check(this, action.place, homeLocation())
+            AppLog.i("Address check for ${quote(action.place)}: $result")
+            when (result) {
+                is AddressCheck.Result.Found -> if (result.sure) {
+                    todo = action.copy(place = result.address.query)
+                    saying = "Navigating to ${result.address.spoken}."
+                } else {
+                    return askAboutAddress(PendingNavigation(action, result.address, attempt), "Did you mean ${result.address.spoken}?")
+                }
+                AddressCheck.Result.NotFound -> if (attempt < MAX_ADDRESS_TRIES) {
+                    return askAboutAddress(
+                        PendingNavigation(action, null, attempt),
+                        "I couldn't find ${action.place}. What city is it in, or can you say the address again?",
+                    )
+                } else {
+                    saying = "I couldn't confirm that address, so Maps will search for it."
+                }
+                // No lookup available: navigate as heard.
+                AddressCheck.Result.Unavailable -> Unit
+            }
+        }
+        if (todo.opensApp && !unlocked()) {
+            messages += AssistMessage("Unlock your phone to do that.", isInput = false, isError = true)
+            return false
+        }
+        if (saying != null) {
+            messages += AssistMessage(saying, isInput = false)
+            if (currentPipeline?.supportsSpeech == true) say(saying)
+        }
+        // Music needs the audio Assist is holding; a pause key goes out first, while it's still held.
+        if (todo is PhoneAction.Play) audioManager.abandonAudioFocusRequest(audioFocus)
+        val problem = PhoneActions.start(this, todo)
+        if (problem != null) {
+            AppLog.w("Phone action failed: $problem")
+            messages += AssistMessage(problem, isInput = false, isError = true)
+            syncLog()
+            return false
+        }
+        if (saying == null) messages += AssistMessage(todo.reply, isInput = false)
+        syncLog()
+        if (action is PhoneAction.Timer && currentPipeline?.supportsSpeech == true) {
+            say(action.reply)
+        } else if (!action.opensApp) {
+            // Leave the confirmation on screen for a moment.
+            delay(1200)
+        }
+        finish()
+        return false
+    }
+
+    /** A street address that needs the user's answer before navigating. [suggestion]: the closest match found. */
+    private data class PendingNavigation(val action: PhoneAction.Navigate, val suggestion: AddressCheck.Address?, val attempt: Int)
+
+    private var pendingNavigation: PendingNavigation? = null
+
+    private suspend fun askAboutAddress(pending: PendingNavigation, question: String): Boolean {
+        pendingNavigation = pending
+        messages += AssistMessage(question, isInput = false)
+        syncLog()
+        if (currentPipeline?.supportsSpeech == true) say(question)
+        return true
+    }
+
+    /** Handles the answer to [askAboutAddress]; true when there's another question. */
+    private suspend fun answerAboutAddress(pending: PendingNavigation, answer: String): Boolean {
+        val words = answer.lowercase().split(Regex("[^a-z']+")).filter { it.isNotEmpty() }
+        val suggestion = pending.suggestion
+        return when {
+            suggestion != null && words.isNotEmpty() && words.all { it in YES_WORDS } ->
+                runPhoneAction(
+                    pending.action.copy(place = suggestion.query),
+                    answer,
+                    confirmed = "Navigating to ${suggestion.spoken}.",
+                )
+            words.isNotEmpty() && words.all { it in NO_WORDS } ->
+                askAboutAddress(pending.copy(suggestion = null, attempt = pending.attempt + 1), "Okay. What's the address?")
+            else -> {
+                // A whole new address ("take me to…" or just the address), or the missing city.
+                val said = answer.trim()
+                    .replace(Regex("^(?:(?:no|nope|nah|yes|yeah)[,.]?\\s+)?(?:(?:it's|it is|that's|that is)\\s+)?(?:in\\s+)?", RegexOption.IGNORE_CASE), "")
+                    .trimEnd('.', '?', '!')
+                val place = (PhoneActions.parse(answer, settings.navigationApp) as? PhoneAction.Navigate)?.place
+                    ?: PhoneActions.withHouseNumber(said).takeIf { it.firstOrNull()?.isDigit() == true }
+                    ?: "${pending.action.place}, $said"
+                runPhoneAction(pending.action.copy(place = place), answer, attempt = pending.attempt + 1)
+            }
+        }
+    }
+
+    private var home: Pair<Double, Double>? = null
+    private var homeLooked = false
+
+    /** Home Assistant's home location, so addresses are looked up nearby first. */
+    private suspend fun homeLocation(): Pair<Double, Double>? {
+        if (!homeLooked) {
+            homeLooked = true
+            home = try {
+                connectedClient().homeLocation()
+            } catch (e: HaException) {
+                null
+            }
+        }
+        return home
+    }
+
+    /** Listens for an answer once [run] (the current listening run) has finished. */
+    private fun listenAfter(run: Job?) {
+        lifecycleScope.launch {
+            run?.join()
+            startListening(followUp = true)
+        }
+    }
+
+    /** True once the phone is unlocked, asking for the screen lock first if needed. */
+    private suspend fun unlocked(): Boolean {
+        val keyguard = getSystemService(KeyguardManager::class.java)
+        if (!keyguard.isKeyguardLocked) return true
+        // The unlock screen covers the sheet; that mustn't close the conversation.
+        usingOtherScreen = true
+        return try {
+            suspendCancellableCoroutine { continuation ->
+                keyguard.requestDismissKeyguard(
+                    this,
+                    object : KeyguardManager.KeyguardDismissCallback() {
+                        override fun onDismissSucceeded() = continuation.resume(true)
+                        override fun onDismissCancelled() = continuation.resume(false)
+                        override fun onDismissError() = continuation.resume(false)
+                    },
+                )
+            }
+        } finally {
+            usingOtherScreen = false
         }
     }
 
@@ -678,6 +852,20 @@ class AssistActivity : ComponentActivity() {
                 }
                 val heardAt = elapsed()
                 messages[inputIndex] = AssistMessage(inputBubble(text), isInput = true)
+                pendingNavigation?.let { pending ->
+                    // The answer to "Did you mean …?" about an address.
+                    pendingNavigation = null
+                    if (exit == ExitWords.Kind.GOODBYE) {
+                        finish()
+                    } else if (answerAboutAddress(pending, text) && settings.handsFree) {
+                        listenAfter(coroutineContext[Job])
+                    }
+                    return@launch
+                }
+                phoneAction(text)?.let { action ->
+                    if (runPhoneAction(action, text) && settings.handsFree) listenAfter(coroutineContext[Job])
+                    return@launch
+                }
                 messages += AssistMessage("", isInput = false, isPlaceholder = true)
                 replyIndex = messages.lastIndex
 

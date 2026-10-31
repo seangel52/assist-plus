@@ -5,6 +5,7 @@ import android.content.Context
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
+import android.os.Build
 import com.k2fsa.sherpa.onnx.FeatureConfig
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.isActive
@@ -98,12 +99,25 @@ object WakeWords {
         val stream = spotter.createStream(spec)
         val recent = FloatArray(rate * 2)
         var recentPos = 0
+        // Android hands a background app silence while another app has the microphone; note it in the log.
+        var silenced = false
+        var chunksRead = 0
         try {
             record.startRecording()
             val buffer = ByteArray(chunk)
             while (isActive) {
                 val read = record.read(buffer, 0, buffer.size)
                 if (read <= 0) continue
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && ++chunksRead % SILENCE_CHECK_CHUNKS == 0) {
+                    val now = record.activeRecordingConfiguration?.isClientSilenced == true
+                    if (now != silenced) {
+                        silenced = now
+                        AppLog.i(
+                            if (now) "Wake word: Android gave the microphone to another app; not hearing anything"
+                            else "Wake word: microphone is back",
+                        )
+                    }
+                }
                 val samples = VoiceProfile.toFloats(buffer.copyOf(read))
                 for (s in samples) {
                     recent[recentPos] = s
@@ -147,6 +161,9 @@ object WakeWords {
 
     // In noisy rooms the owner's wake phrase has scored as low as 0.23.
     private const val WAKE_VOICE_MIN = 0.15f
+
+    // About every 2 seconds (40 ms chunks).
+    private const val SILENCE_CHECK_CHUNKS = 50
 
     /**
      * Tunes a phrase from the owner saying it several times: picks the strictest trigger

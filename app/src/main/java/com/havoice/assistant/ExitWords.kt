@@ -67,7 +67,7 @@ object ExitWords {
             editDistance(word, target) <= (if (target.length >= 5) 2 else 1)
         } || word.endsWith("ansel") || word.endsWith("ancel")
 
-    private fun editDistance(a: String, b: String): Int {
+    fun editDistance(a: String, b: String): Int {
         var previous = IntArray(b.length + 1) { it }
         for (i in 1..a.length) {
             val current = IntArray(b.length + 1)

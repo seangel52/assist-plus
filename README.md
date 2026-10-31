@@ -20,6 +20,7 @@
 - **Speech to text on the phone.** Your words appear on screen *as you speak*, not at the end. Home Assistant only ever receives text.
 - **Better conversations.** Hands-free follow-ups, room to pause and think before it decides you're done, "cancel" / "never mind" to close it, and the agent can end the conversation itself.
 - **Custom wake words.** Pick any phrase, record it a few times so it learns how you say it. Optional spoken PIN when the phone is locked (experimental).
+- **Phone actions.** "Take me to Target on Main Street", "play my driving playlist on Spotify", "pause Spotify", "set a timer for 10 minutes" — done right on the phone in Google Maps (or Waze), Spotify or YouTube Music, and your clock app. Everything else goes to Home Assistant.
 - **Photos, files and barcodes.** Snap a barcode and say "I had one serving of this"; send a photo and say "remember this wine". The phone reads barcodes itself and looks them up in Open Food Facts; photos are described by your Home Assistant AI Task.
 - **Looks like Home Assistant.** The Assist sheet copies the Companion app's design, and it uses your existing pipelines, agents and voices.
 
@@ -80,7 +81,7 @@ Before this, with speech-to-text in the cloud and no voice filtering, the same s
 ### 1. Home Assistant (2025.8 or newer recommended; developed on 2026.9)
 
 1. **Reach Home Assistant from your phone.** At home, the local address works (`http://homeassistant.local:8123`). To use it away from home, use [Home Assistant Cloud (Nabu Casa)](https://www.nabucasa.com/) and its remote address (`https://….ui.nabu.casa`), or your own HTTPS address.
-2. **Add an AI conversation agent** (strongly recommended). Settings → Devices & services → **Add integration** → **Anthropic** (Claude), **OpenAI**, **Google Gemini**, or **Ollama** for local. Home Assistant's built-in agent works too, but only for fixed device commands.
+2. **Add an AI conversation agent** (strongly recommended). Settings → Devices & services → **Add integration** → **Anthropic** (Claude), **OpenAI**, **Google Gemini**, or **Ollama** for local. Home Assistant's built-in agent works too, but only for fixed device commands. Tip: in the agent's settings, turn on **web search** (Anthropic and OpenAI have it) so it can look up places, addresses and hours.
 3. **Create or edit an assistant.** Settings → **Voice assistants** → your assistant (or **Add assistant**):
    - **Conversation agent:** the AI agent from step 2. Turn on "Prefer handling commands locally" if you like.
    - **Text-to-speech:** Home Assistant Cloud, **ElevenLabs** (Add integration → ElevenLabs), Google, or local **Piper** (Settings → Apps → Piper). Pick a **voice** — Assist Plus speaks replies with it.
@@ -142,7 +143,7 @@ Requires JDK 17 and the Android SDK (command-line tools are enough).
 
 Fork it, improve it, send pull requests, or take the ideas to the [Home Assistant Companion app](https://github.com/home-assistant/android). Things I'd like next:
 
-- **Phone actions:** "take me to Target on Main Street" → Google Maps navigation; "play my driving playlist on Spotify"; timers — handled on the phone, no Home Assistant round trip.
+- More phone actions: alarms, calls and texts, opening any app.
 - Models downloaded on first launch instead of bundled (smaller APK).
 - More languages (the models are English-only today).
 

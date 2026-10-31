@@ -196,6 +196,52 @@ private fun NoiseSection(settings: HaSettings) {
     status?.let { Text(it, color = MaterialTheme.colorScheme.primary) }
 }
 
+@Composable
+private fun PhoneActionsSection(settings: HaSettings) {
+    var enabled by remember { mutableStateOf(settings.phoneActions) }
+    var navigationApp by remember { mutableStateOf(settings.navigationApp) }
+
+    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text("Phone actions", style = MaterialTheme.typography.titleMedium)
+            Text(
+                "Handle these on the phone instead of sending them to Home Assistant:\n" +
+                    "• \"Take me to Target on Main Street\"\n" +
+                    "• \"Play my driving playlist on Spotify\" / \"Pause Spotify\" / \"Next song on Spotify\"\n" +
+                    "• \"Set a timer for 10 minutes\"",
+                style = MaterialTheme.typography.bodySmall,
+            )
+        }
+        Switch(
+            checked = enabled,
+            onCheckedChange = {
+                enabled = it
+                settings.phoneActions = it
+            },
+        )
+    }
+    if (enabled) {
+        Text("Navigation app", style = MaterialTheme.typography.bodyMedium)
+        NavigationApp.entries.forEach { option ->
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .selectable(
+                        selected = navigationApp == option,
+                        onClick = {
+                            navigationApp = option
+                            settings.navigationApp = option
+                        },
+                    ),
+            ) {
+                RadioButton(selected = navigationApp == option, onClick = null)
+                Text(option.label, modifier = Modifier.padding(start = 8.dp))
+            }
+        }
+    }
+}
+
 // Short, command-like phrases, so the voiceprint matches how Assist is actually spoken to.
 private val ENROLL_SENTENCES = listOf(
     "Hey, what time is it?",
@@ -863,6 +909,9 @@ private fun SettingsScreen(
                     "when you stop mid-sentence (on \"and…\", \"um…\", or without finishing the thought).",
                 style = MaterialTheme.typography.bodySmall,
             )
+
+            HorizontalDivider()
+            PhoneActionsSection(settings)
 
             HorizontalDivider()
             VoiceIdSection(settings)

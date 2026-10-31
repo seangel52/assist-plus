@@ -8,7 +8,7 @@ Assist Plus is Apache-2.0 licensed. It builds on the work below; thank you to al
 | [Material Design Icons](https://pictogrammers.com/library/mdi/) | Icons | Apache-2.0 |
 | [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) | On-device speech engine | Apache-2.0 |
 | [ONNX Runtime](https://github.com/microsoft/onnxruntime) (inside sherpa-onnx) | Running the models | MIT |
-| [NVIDIA Parakeet TDT-CTC 110M](https://huggingface.co/nvidia/parakeet-tdt_ctc-110m) | Speech to text | CC-BY-4.0 |
+| [NVIDIA Parakeet TDT-CTC 110M](https://huggingface.co/nvidia/parakeet-tdt_ctc-110m) (TDT decoder) | Speech to text | CC-BY-4.0 |
 | [NVIDIA TitaNet small](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/nemo/models/titanet_small) | Voice ID | CC-BY-4.0 |
 | [Silero VAD](https://github.com/snakers4/silero-vad) | Speech detection | MIT |
 | [DPDFNet / DeepFilterNet](https://github.com/Rikorose/DeepFilterNet) | Noise removal (Strong) | MIT / Apache-2.0 |

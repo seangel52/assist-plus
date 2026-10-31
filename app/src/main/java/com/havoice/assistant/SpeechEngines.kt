@@ -3,9 +3,9 @@ package com.havoice.assistant
 import android.content.Context
 import com.k2fsa.sherpa.onnx.FeatureConfig
 import com.k2fsa.sherpa.onnx.OfflineModelConfig
-import com.k2fsa.sherpa.onnx.OfflineNemoEncDecCtcModelConfig
 import com.k2fsa.sherpa.onnx.OfflineRecognizer
 import com.k2fsa.sherpa.onnx.OfflineRecognizerConfig
+import com.k2fsa.sherpa.onnx.OfflineTransducerModelConfig
 import com.k2fsa.sherpa.onnx.SileroVadModelConfig
 import com.k2fsa.sherpa.onnx.SpeakerEmbeddingExtractor
 import com.k2fsa.sherpa.onnx.SpeakerEmbeddingExtractorConfig
@@ -50,14 +50,21 @@ class SpeechEngines private constructor(
                         sampleRate = MicRecorder.SAMPLE_RATE,
                     ),
                 )
-                // NVIDIA Parakeet TDT-CTC 110M (English, int8): reads a whole command in ~50 ms
-                // on the phone, fast enough to also drive the live transcript.
+                // NVIDIA Parakeet 110M (English, int8) with its TDT decoder: reads a whole command
+                // in ~50 ms on the phone, fast enough to also drive the live transcript. The same
+                // model's CTC decoder was as fast but spelled out sounds ("East Oakland" →
+                // "Eastoak Lind"); TDT weighs each word against the ones before it.
                 val recognizer = OfflineRecognizer(
                     assetManager = assets,
                     config = OfflineRecognizerConfig(
                         featConfig = FeatureConfig(sampleRate = MicRecorder.SAMPLE_RATE, featureDim = 80),
                         modelConfig = OfflineModelConfig(
-                            nemo = OfflineNemoEncDecCtcModelConfig(model = "final/model.int8.onnx"),
+                            transducer = OfflineTransducerModelConfig(
+                                encoder = "final/encoder.int8.onnx",
+                                decoder = "final/decoder.int8.onnx",
+                                joiner = "final/joiner.int8.onnx",
+                            ),
+                            modelType = "nemo_transducer",
                             tokens = "final/tokens.txt",
                             numThreads = 2,
                         ),

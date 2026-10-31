@@ -1,0 +1,143 @@
+package com.havoice.assistant
+
+import android.content.Context
+import android.location.Geocoder
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
+import java.io.IOException
+import java.util.Locale
+
+/**
+ * Looks a spoken street address up before navigating, so a misheard house number or street is
+ * caught instead of sending the driver somewhere else. Uses Android's built-in geocoder (Google's,
+ * the same lookup Maps does), searching near the Home Assistant home first.
+ */
+object AddressCheck {
+    data class Address(val houseNumber: String?, val street: String?, val city: String?, val state: String?) {
+        /** What the assistant says: "3140 East Oakland Street, Springfield". */
+        val spoken get() = listOfNotNull(streetLine(), city).joinToString(", ")
+
+        /** What the maps app gets, with the state so it can't pick another city's street. */
+        val query get() = listOfNotNull(streetLine(), city, state).joinToString(", ")
+
+        private fun streetLine() = listOfNotNull(houseNumber, street).joinToString(" ").ifBlank { null }
+    }
+
+    sealed class Result {
+        /** [sure]: same house number and (nearly) the same street, so just go. */
+        data class Found(val address: Address, val sure: Boolean) : Result()
+        data object NotFound : Result()
+
+        /** No geocoder on this phone, or it's offline: navigate as heard. */
+        data object Unavailable : Result()
+    }
+
+    private val HOUSE_NUMBER = Regex("^(\\d+[a-z]?)\\s+(.+)$", RegexOption.IGNORE_CASE)
+
+    /** Only street addresses are checked; "Target on Main Street" is left to the maps app's search. */
+    fun needsCheck(place: String) = HOUSE_NUMBER.matches(place)
+
+    suspend fun check(context: Context, place: String, near: Pair<Double, Double>?): Result {
+        if (!Geocoder.isPresent()) return Result.Unavailable
+        val geocoder = Geocoder(context, Locale.getDefault())
+        val results = withContext(Dispatchers.IO) {
+            withTimeoutOrNull(8_000) {
+                try {
+                    // Near home first, then anywhere.
+                    val nearby = near?.let { (lat, lng) -> lookUp(geocoder, place, lat, lng) }.orEmpty()
+                    nearby.ifEmpty { lookUp(geocoder, place, null, null) }
+                } catch (e: IOException) {
+                    AppLog.w("Address lookup failed: ${e.message}")
+                    null
+                }
+            }
+        } ?: return Result.Unavailable
+        AppLog.i("Address lookup for \"$place\": ${describe(results)}")
+        judge(place, results).takeIf { it != Result.NotFound }?.let { return it }
+
+        // Nothing at that number: look for the street alone, so the user can be asked about it.
+        val (number, street) = HOUSE_NUMBER.find(place)?.destructured ?: return Result.NotFound
+        val streetResults = withContext(Dispatchers.IO) {
+            withTimeoutOrNull(8_000) {
+                try {
+                    val nearby = near?.let { (lat, lng) -> lookUp(geocoder, street, lat, lng) }.orEmpty()
+                    nearby.ifEmpty { lookUp(geocoder, street, null, null) }
+                } catch (e: IOException) {
+                    null
+                }
+            }
+        }.orEmpty()
+        AppLog.i("Address lookup for the street \"$street\": ${describe(streetResults)}")
+        // The number wasn't found, so this can only be a question ("Did you mean 956 Elmwood Drive?").
+        return when (val streetOnly = judge(place, streetResults.map { it.copy(houseNumber = null) })) {
+            is Result.Found -> Result.Found(streetOnly.address.copy(houseNumber = number), sure = false)
+            else -> Result.NotFound
+        }
+    }
+
+    private fun describe(results: List<Address>) =
+        if (results.isEmpty()) "nothing" else results.joinToString("; ") { it.query.ifBlank { "(no street)" } }
+
+    @Suppress("DEPRECATION") // The callback version needs Android 13.
+    private fun lookUp(geocoder: Geocoder, place: String, lat: Double?, lng: Double?): List<Address> {
+        val found = if (lat != null && lng != null) {
+            geocoder.getFromLocationName(place, 5, lat - NEARBY_DEGREES, lng - NEARBY_DEGREES, lat + NEARBY_DEGREES, lng + NEARBY_DEGREES)
+        } else {
+            geocoder.getFromLocationName(place, 5)
+        }
+        return found.orEmpty().map { Address(it.subThoroughfare, it.thoroughfare, it.locality, it.adminArea) }
+    }
+
+    /** Picks the best of [results] for what was said ([place] starts with the house number). */
+    fun judge(place: String, results: List<Address>): Result {
+        val (number, rest) = HOUSE_NUMBER.find(place)?.destructured ?: return Result.NotFound
+        val spokenStreet = streetPart(rest)
+        val scored = results.filter { it.street != null }.map { address ->
+            val sameNumber = address.houseNumber.equals(number, ignoreCase = true)
+            Triple(address, sameNumber, similarity(normalize(spokenStreet), normalize(address.street!!)))
+        }
+        val best = scored.maxWithOrNull(compareBy({ (_, sameNumber, score) -> sameNumber && score >= SAME_STREET }, { it.third }))
+            ?: return Result.NotFound
+        val (address, sameNumber, score) = best
+        return when {
+            sameNumber && score >= SAME_STREET -> Result.Found(address, sure = true)
+            (sameNumber && score >= SIMILAR_STREET) || score >= SAME_STREET -> Result.Found(address, sure = false)
+            else -> Result.NotFound
+        }
+    }
+
+    /** "East Oakland Street Springfield" → "East Oakland Street": a city said after the street isn't compared. */
+    private fun streetPart(text: String): String {
+        val words = text.split(Regex("[\\s,]+")).filter { it.isNotEmpty() }
+        val last = words.indexOfLast { it.lowercase().trim('.') in PhoneActions.STREET_WORDS }
+        return if (last >= 0) words.take(last + 1).joinToString(" ") else text
+    }
+
+    private val ABBREVIATIONS = mapOf(
+        "n" to "north", "s" to "south", "e" to "east", "w" to "west",
+        "ne" to "northeast", "nw" to "northwest", "se" to "southeast", "sw" to "southwest",
+        "st" to "street", "rd" to "road", "ave" to "avenue", "dr" to "drive", "ln" to "lane",
+        "blvd" to "boulevard", "ct" to "court", "pl" to "place", "pkwy" to "parkway",
+        "hwy" to "highway", "cir" to "circle",
+    )
+
+    /** "E Oakland St." and "East Oakland Street" both become "eastoaklandstreet". */
+    private fun normalize(street: String) = street.lowercase()
+        .split(Regex("[^a-z0-9]+"))
+        .filter { it.isNotEmpty() }
+        .joinToString("") { ABBREVIATIONS[it] ?: it }
+
+    /** 1 for the same text, falling toward 0 as more letters differ. */
+    private fun similarity(a: String, b: String): Float {
+        if (a.isEmpty() || b.isEmpty()) return 0f
+        return 1f - ExitWords.editDistance(a, b).toFloat() / maxOf(a.length, b.length)
+    }
+
+    // A misheard street ("Eastoak Lind" for "East Oakland") still scores about 0.9; a different street is far lower.
+    private const val SAME_STREET = 0.75f
+    private const val SIMILAR_STREET = 0.5f
+
+    // About 75 km around home.
+    private const val NEARBY_DEGREES = 0.7
+}

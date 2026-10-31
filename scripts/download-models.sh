@@ -26,11 +26,11 @@ get "$R/asr-models/silero_vad.onnx" "$A/vad/silero_vad.onnx"
 echo "Voice ID (NVIDIA TitaNet small)"
 get "$R/speaker-recongition-models/nemo_en_titanet_small.onnx" "$A/speaker/titanet_small_en.onnx"
 
-echo "Speech to text (NVIDIA Parakeet TDT-CTC 110M, int8)"
-P=sherpa-onnx-nemo-parakeet_tdt_ctc_110m-en-36000-int8
+echo "Speech to text (NVIDIA Parakeet TDT 110M, int8)"
+P=sherpa-onnx-nemo-parakeet_tdt_transducer_110m-en-36000-int8
 get "$R/asr-models/$P.tar.bz2" "$TMP/p.tar.bz2"
 tar -xjf "$TMP/p.tar.bz2" -C "$TMP"
-cp "$TMP/$P/model.int8.onnx" "$A/final/model.int8.onnx"
+for f in encoder decoder joiner; do cp "$TMP/$P/$f.int8.onnx" "$A/final/$f.int8.onnx"; done
 cp "$TMP/$P/tokens.txt" "$A/final/tokens.txt"
 
 echo "Wake words (keyword spotter, GigaSpeech 3.3M)"
