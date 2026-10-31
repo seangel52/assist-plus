@@ -3,20 +3,12 @@ package com.havoice.assistant
 import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
-import android.media.AudioManager
 import android.net.Uri
 import android.provider.AlarmClock
-import android.provider.MediaStore
-import android.view.KeyEvent
 
 enum class NavigationApp(val label: String, val packageName: String) {
     GOOGLE_MAPS("Google Maps", "com.google.android.apps.maps"),
     WAZE("Waze", "com.waze"),
-}
-
-enum class MusicApp(val label: String, val packageName: String) {
-    SPOTIFY("Spotify", "com.spotify.music"),
-    YOUTUBE_MUSIC("YouTube Music", "com.google.android.apps.youtube.music"),
 }
 
 /** Something the phone does itself instead of asking Home Assistant. */
@@ -29,20 +21,6 @@ sealed class PhoneAction {
 
     data class Navigate(val place: String, val mode: TravelMode, val app: NavigationApp) : PhoneAction() {
         override val reply get() = "Starting ${mode.word}directions to $place in ${app.label}."
-    }
-
-    /** An empty [query] plays whatever the app picks (usually where you left off). */
-    data class Play(val query: String, val app: MusicApp) : PhoneAction() {
-        override val reply get() = if (query.isEmpty()) "Opening ${app.label}." else "Playing $query on ${app.label}."
-    }
-
-    data class MediaKey(val keyCode: Int, val app: MusicApp) : PhoneAction() {
-        override val opensApp get() = false
-        override val reply get() = when (keyCode) {
-            KeyEvent.KEYCODE_MEDIA_PAUSE -> "Paused ${app.label}."
-            KeyEvent.KEYCODE_MEDIA_NEXT -> "Next song."
-            else -> "Previous song."
-        }
     }
 
     data class Timer(val seconds: Int) : PhoneAction() {
@@ -58,9 +36,10 @@ enum class TravelMode(val code: String, val word: String) {
 }
 
 /**
- * Recognizes requests the phone can handle on its own: navigation, playing music on Spotify or
- * YouTube Music, and timers. Patterns are strict on purpose: anything they don't clearly match
- * ("pause the living room speaker", "how long is left on the timer") goes to Home Assistant.
+ * Recognizes requests the phone can handle on its own: navigation and timers. Patterns are strict
+ * on purpose: anything they don't clearly match ("how long is left on the timer") goes to Home
+ * Assistant. Music goes to Home Assistant too: Spotify only takes play requests through its
+ * online service, which Home Assistant (SpotifyPlus) reaches for the phone and every speaker.
  */
 object PhoneActions {
     private val LEAD = Regex(
@@ -81,29 +60,10 @@ object PhoneActions {
     )
     private val NAVIGATION_APP = Regex("\\s+(?:on|in|with|using|via)\\s+(google maps|maps|waze)$", RegexOption.IGNORE_CASE)
 
-    private const val MUSIC_APPS = "spotify|youtube music|yt music"
-    private val PLAY_ON = Regex(
-        "^(?:play|put on|shuffle|listen to)\\s+(.+?)\\s+(?:on|in|from|with|using|via)\\s+($MUSIC_APPS)$",
-        RegexOption.IGNORE_CASE,
-    )
-    private val APP_PLAY = Regex("^($MUSIC_APPS)[,\\s]+(?:play|shuffle)\\s+(.+)$", RegexOption.IGNORE_CASE)
-    private val PLAY_APP = Regex("^(?:play|open|start|resume|unpause|continue)\\s+($MUSIC_APPS)$", RegexOption.IGNORE_CASE)
-
-    private val CONTROL_FILLER = setOf("the", "this", "song", "track", "music", "on", "in", "to", "a", "go")
-    private val CONTROL_KEYS = mapOf(
-        "pause" to KeyEvent.KEYCODE_MEDIA_PAUSE,
-        "stop" to KeyEvent.KEYCODE_MEDIA_PAUSE,
-        "skip" to KeyEvent.KEYCODE_MEDIA_NEXT,
-        "next" to KeyEvent.KEYCODE_MEDIA_NEXT,
-        "previous" to KeyEvent.KEYCODE_MEDIA_PREVIOUS,
-        "back" to KeyEvent.KEYCODE_MEDIA_PREVIOUS,
-        "last" to KeyEvent.KEYCODE_MEDIA_PREVIOUS,
-    )
-
     fun parse(text: String, navigationApp: NavigationApp): PhoneAction? {
         val request = text.trim().replace(LEAD, "").replace(TRAIL, "")
         if (request.isEmpty()) return null
-        return navigation(request, navigationApp) ?: music(request) ?: timer(request)
+        return navigation(request, navigationApp) ?: timer(request)
     }
 
     private fun navigation(request: String, defaultApp: NavigationApp): PhoneAction? {
@@ -291,24 +251,6 @@ object PhoneActions {
         return if (result > 0 || words.any { it == "zero" || it == "0" }) result.toString() else null
     }
 
-    private fun music(request: String): PhoneAction? {
-        PLAY_ON.find(request)?.let { return PhoneAction.Play(it.groupValues[1].trim(), musicApp(it.groupValues[2])) }
-        APP_PLAY.find(request)?.let { return PhoneAction.Play(it.groupValues[2].trim(), musicApp(it.groupValues[1])) }
-        PLAY_APP.find(request)?.let { return PhoneAction.Play("", musicApp(it.groupValues[1])) }
-
-        // "pause Spotify", "skip this song on Spotify": only when the app is named, so
-        // "pause the music" can still mean a speaker Home Assistant controls.
-        val lower = request.lowercase()
-        val app = MusicApp.entries.firstOrNull { lower.contains(it.label.lowercase()) }
-            ?: if (lower.contains("yt music")) MusicApp.YOUTUBE_MUSIC else return null
-        val words = lower.replace(app.label.lowercase(), " ").replace("yt music", " ")
-            .split(Regex("[^a-z]+")).filter { it.isNotEmpty() && it !in CONTROL_FILLER }
-        val key = words.singleOrNull()?.let { CONTROL_KEYS[it] } ?: return null
-        return PhoneAction.MediaKey(key, app)
-    }
-
-    private fun musicApp(name: String) = if (name.equals("spotify", ignoreCase = true)) MusicApp.SPOTIFY else MusicApp.YOUTUBE_MUSIC
-
     private val TIMER_START = Regex("^(?:set|start|create|make|put on)\\b|^(?:a |an )?[0-9a-z ]+ timer$", RegexOption.IGNORE_CASE)
     private val NOT_A_NEW_TIMER = Regex("\\b(?:cancel|stop|delete|remove|pause|how|left|remaining|check)\\b", RegexOption.IGNORE_CASE)
 
@@ -393,13 +335,6 @@ object PhoneActions {
     /** Does [action]; returns a message to show if it couldn't. */
     fun start(context: Context, action: PhoneAction): String? = when (action) {
         is PhoneAction.Navigate -> navigate(context, action)
-        is PhoneAction.Play -> play(context, action)
-        is PhoneAction.MediaKey -> {
-            val audio = context.getSystemService(AudioManager::class.java)
-            audio.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, action.keyCode))
-            audio.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_UP, action.keyCode))
-            null
-        }
         is PhoneAction.Timer -> {
             val timer = Intent(AlarmClock.ACTION_SET_TIMER)
                 .putExtra(AlarmClock.EXTRA_LENGTH, action.seconds)
@@ -417,17 +352,6 @@ object PhoneActions {
         // Without that app, any maps app can at least search for the place.
         val started = launch(context, preferred) || launch(context, Intent(Intent.ACTION_VIEW, Uri.parse("geo:0,0?q=$place")))
         return if (started) null else "No maps app is installed."
-    }
-
-    private fun play(context: Context, action: PhoneAction.Play): String? {
-        // The standard "play from search" request, which Google Assistant also uses with these apps.
-        val search = Intent(MediaStore.INTENT_ACTION_MEDIA_PLAY_FROM_SEARCH)
-            .setPackage(action.app.packageName)
-            .putExtra(MediaStore.EXTRA_MEDIA_FOCUS, "vnd.android.cursor.item/*")
-            .putExtra(android.app.SearchManager.QUERY, action.query)
-        val started = launch(context, search) ||
-            context.packageManager.getLaunchIntentForPackage(action.app.packageName)?.let { launch(context, it) } == true
-        return if (started) null else "${action.app.label} isn't installed."
     }
 
     /** Starts [intent] in its own task; false if no app handles it. */

@@ -22,7 +22,8 @@ I built this with Claude because I wanted the Assist experience to work for my f
 - **Speech to text on the phone.** Your words appear on screen *as you speak*, not at the end. Home Assistant only ever receives text.
 - **Better conversations.** Hands-free follow-ups, room to pause and think before it decides you're done, "cancel" / "never mind" to close it, and the agent can end the conversation itself.
 - **Custom wake words.** Pick any phrase, record it a few times so it learns how you say it. Optional spoken PIN when the phone is locked (experimental).
-- **Phone actions.** "Take me to Target on Main Street", "play my driving playlist on Spotify", "pause Spotify", "set a timer for 10 minutes" — done right on the phone in Google Maps (or Waze), Spotify or YouTube Music, and your clock app. Everything else goes to Home Assistant.
+- **Phone actions.** "Take me to Target on Main Street" and "set a timer for 10 minutes" are done right on the phone in Google Maps (or Waze) and your clock app. Addresses are checked first, so a misheard house number becomes a "Did you mean…?" instead of a wrong turn. Everything else goes to Home Assistant.
+- **Music through Home Assistant.** With [SpotifyPlus](#music-spotify) on the server, "play Dare You by Papadosio", "next song", "what's playing" and "add this song to Road Trip" work on your phone or any speaker in the house — even on mobile data.
 - **Photos, files and barcodes.** Snap a barcode and say "I had one serving of this"; send a photo and say "remember this wine". The phone reads barcodes itself and looks them up in Open Food Facts; photos are described by your Home Assistant AI Task.
 - **Looks like Home Assistant.** The Assist sheet copies the Companion app's design, and it uses your existing pipelines, agents and voices.
 
@@ -101,6 +102,16 @@ Before this, with speech-to-text in the cloud and no voice filtering, the same s
 5. **Wake word (optional):** Wake word → add a phrase (3+ syllables of everyday words work best), tap **Record**, allow **open over other apps**. Android shows a notification while it listens.
 
 The Home Assistant Companion app keeps working as before for dashboards, notifications and location — Assist Plus only replaces the assistant panel.
+
+### Music (Spotify)
+
+Spotify doesn't accept play requests from other apps on the phone, so music is handled by Home Assistant, which reaches your phone and every speaker through Spotify's own service. Recommended setup (Spotify Premium required):
+
+1. **Install [SpotifyPlus](https://github.com/thlucas1/homeassistantcomponent_spotifyplus) on the server:** HACS → ⋮ → **Custom repositories** → `thlucas1/homeassistantcomponent_spotifyplus` (Integration) → **Download** → restart. Then Settings → Devices & services → **Add integration** → **SpotifyPlus** and sign in to Spotify. It needs a Spotify developer app ([developer.spotify.com](https://developer.spotify.com/dashboard)) with `https://my.home-assistant.io/redirect/oauth` as a Redirect URI. SpotifyPlus replaces Home Assistant's built-in Spotify integration.
+2. **Add the four music tools** from [`docs/home-assistant/spotify-scripts.yaml`](docs/home-assistant/spotify-scripts.yaml) (play, control, what's playing, add to playlist). Replace the three `YOUR_…` placeholders first.
+3. **Expose them to the assistant:** Settings → **Voice assistants** → **Expose** → add the four scripts.
+
+Your agent then picks the right tool on its own: "play some Khruangbin in the kitchen", "skip ahead 30 seconds", "who sings this?", "add this song to Road Trip". Spotify only lists a phone while its app is open; the play tool opens Spotify on the phone first (through the Companion app).
 
 ## Recommended agent instructions
 

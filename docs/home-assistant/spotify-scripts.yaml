@@ -1,0 +1,418 @@
+# Spotify tools for your Home Assistant voice agent (SpotifyPlus).
+#
+# Four scripts the conversation agent can call: play, control, what's playing, add to playlist.
+# Setup:
+#   1. Install SpotifyPlus from HACS (repository thlucas1/homeassistantcomponent_spotifyplus),
+#      restart, and add it under Settings > Devices & services. Spotify Premium is required.
+#   2. Replace the three placeholders below (search for YOUR_):
+#        - media_player.spotifyplus_YOUR_SPOTIFY_USERNAME  (the SpotifyPlus entity)
+#        - "YOUR PHONE"  (your phone's name in Spotify > Connect to a device)
+#        - notify.mobile_app_YOUR_PHONE  (the Companion app's notify action for your phone)
+#   3. Add each script (Settings > Automations & scenes > Scripts > Add > Edit in YAML), or put
+#      them in scripts.yaml.
+#   4. Settings > Voice assistants > Expose: expose the four scripts to Assist.
+#
+# Notes:
+#   - Spotify ignores single-song play requests from personal developer apps, so a song is
+#     played as its album starting at that song.
+#   - Spotify only lists a phone while its Spotify app is running; spotify_play opens it first
+#     with a Companion app command and waits until Spotify lists it.
+
+spotify_play:
+  alias: Play music on Spotify
+  description: >-
+    Play a song, artist, album or one of the user's playlists on Spotify, on the user's phone or
+    on a speaker or TV in the house. Searches Spotify, so any song or artist works. Use for
+    requests like 'play Dare You by Papadosio', 'play some Khruangbin in the kitchen', 'play my
+    Road Trip playlist'.
+  icon: mdi:spotify
+  mode: queued
+  fields:
+    query:
+      name: What to play
+      description: >-
+        Song with artist ('Dare You by Papadosio'), artist ('Papadosio'), album, or playlist name
+        ('Road Trip'). Fix obvious misspellings of artist names first.
+      required: true
+      selector:
+        text: {}
+    kind:
+      name: Kind
+      description: song, artist, album or playlist. A bare band or singer name is 'artist'.
+      required: true
+      selector:
+        select:
+          options: [song, artist, album, playlist]
+    device:
+      name: Where
+      description: >-
+        'phone', or a speaker/TV name such as 'Kitchen' or 'Living Room TV'. Leave empty to keep
+        playing where Spotify is playing now (or on the phone).
+      required: false
+      selector:
+        text: {}
+  variables:
+    account: media_player.spotifyplus_YOUR_SPOTIFY_USERNAME
+    phone: "YOUR PHONE"
+    wanted: "{{ device | default('') | trim | lower }}"
+    devices: "{{ state_attr(account, 'source_list') or [] }}"
+    target: >-
+      {% if wanted in ['phone', 'my phone', 'the phone', 'cell phone'] %}{{ phone }}
+      {%- elif wanted == '' %}{{ state_attr(account, 'sp_device_name') or phone }}
+      {%- else %}{% set exact = devices | select('equalto', device | trim) | list %}
+      {%- set close = devices | select('search', wanted, ignorecase=True) | list %}
+      {{- (exact + close + [device | trim]) | first }}{% endif %}
+  sequence:
+    - if:
+        - condition: template
+          value_template: "{{ target == phone }}"
+      then:
+        - action: spotifyplus.get_player_devices
+          data:
+            entity_id: "{{ account }}"
+            refresh: true
+          response_variable: known
+        - if:
+            - condition: template
+              value_template: "{{ phone not in (known.result | default([]) | map(attribute='name') | list) }}"
+          then:
+            - action: notify.mobile_app_YOUR_PHONE
+              data:
+                message: command_launch_app
+                data:
+                  package_name: com.spotify.music
+              continue_on_error: true
+            - repeat:
+                sequence:
+                  - delay:
+                      seconds: 2
+                  - action: spotifyplus.get_player_devices
+                    data:
+                      entity_id: "{{ account }}"
+                      refresh: true
+                    response_variable: known
+                until:
+                  - condition: template
+                    value_template: "{{ phone in (known.result | default([]) | map(attribute='name') | list) or repeat.index >= 8 }}"
+    - choose:
+        - conditions:
+            - condition: template
+              value_template: "{{ kind == 'song' }}"
+          sequence:
+            - action: spotifyplus.search_tracks
+              data:
+                entity_id: "{{ account }}"
+                criteria: >-
+                  {% set parts = query.split(' by ', 1) %}{% if parts | length == 2 %}track:{{ parts[0] | trim }} artist:{{ parts[1] | trim }}{% else %}{{ query }}{% endif %}
+                limit: 1
+              response_variable: found
+            - variables:
+                item: "{{ (found.result['items'] | default([]) | first) or {} }}"
+            - if:
+                - condition: template
+                  value_template: "{{ not item }}"
+              then:
+                - variables:
+                    result:
+                      error: "No song found for {{ query }}"
+                - stop: Nothing found
+                  response_variable: result
+            - action: spotifyplus.player_media_play_context
+              data:
+                entity_id: "{{ account }}"
+                context_uri: "{{ item.album.uri }}"
+                offset_uri: "{{ item.uri }}"
+                device_id: "{{ target }}"
+                delay: 1
+            - variables:
+                result:
+                  playing: "{{ item.name }} by {{ item.artists | map(attribute='name') | join(', ') }}"
+                  "on": "{{ target }}"
+        - conditions:
+            - condition: template
+              value_template: "{{ kind == 'artist' }}"
+          sequence:
+            - action: spotifyplus.search_artists
+              data:
+                entity_id: "{{ account }}"
+                criteria: "{{ query }}"
+                limit: 1
+              response_variable: found
+            - variables:
+                item: "{{ (found.result['items'] | default([]) | first) or {} }}"
+            - if:
+                - condition: template
+                  value_template: "{{ not item }}"
+              then:
+                - variables:
+                    result:
+                      error: "No artist found for {{ query }}"
+                - stop: Nothing found
+                  response_variable: result
+            - action: spotifyplus.player_media_play_context
+              data:
+                entity_id: "{{ account }}"
+                context_uri: "{{ item.uri }}"
+                device_id: "{{ target }}"
+                delay: 1
+            - variables:
+                result:
+                  playing: "{{ item.name }}"
+                  "on": "{{ target }}"
+        - conditions:
+            - condition: template
+              value_template: "{{ kind == 'album' }}"
+          sequence:
+            - action: spotifyplus.search_albums
+              data:
+                entity_id: "{{ account }}"
+                criteria: "{{ query }}"
+                limit: 1
+              response_variable: found
+            - variables:
+                item: "{{ (found.result['items'] | default([]) | first) or {} }}"
+            - if:
+                - condition: template
+                  value_template: "{{ not item }}"
+              then:
+                - variables:
+                    result:
+                      error: "No album found for {{ query }}"
+                - stop: Nothing found
+                  response_variable: result
+            - action: spotifyplus.player_media_play_context
+              data:
+                entity_id: "{{ account }}"
+                context_uri: "{{ item.uri }}"
+                device_id: "{{ target }}"
+                delay: 1
+            - variables:
+                result:
+                  playing: "{{ item.name }} by {{ item.artists | map(attribute='name') | join(', ') }}"
+                  "on": "{{ target }}"
+      default:
+        # Your own playlists first: Spotify search can't see private ones.
+        - action: spotifyplus.get_playlist_favorites
+          data:
+            entity_id: "{{ account }}"
+            limit_total: 200
+            filter_criteria: "{{ query | regex_replace('(?i)^(my|the) | playlist$', '') }}"
+          response_variable: mine
+        - variables:
+            item: "{{ (mine.result['items'] | default([]) | first) or {} }}"
+        - if:
+            - condition: template
+              value_template: "{{ not item }}"
+          then:
+            - action: spotifyplus.search_playlists
+              data:
+                entity_id: "{{ account }}"
+                criteria: "{{ query }}"
+                limit: 1
+              response_variable: found
+            - variables:
+                item: "{{ (found.result['items'] | default([]) | first) or {} }}"
+        - if:
+            - condition: template
+              value_template: "{{ not item }}"
+          then:
+            - variables:
+                result:
+                  error: "No playlist found for {{ query }}"
+            - stop: Nothing found
+              response_variable: result
+        - action: spotifyplus.player_media_play_context
+          data:
+            entity_id: "{{ account }}"
+            context_uri: "{{ item.uri }}"
+            device_id: "{{ target }}"
+            delay: 1
+        - variables:
+            result:
+              playing: "the {{ item.name }} playlist"
+              "on": "{{ target }}"
+    - stop: Playing
+      response_variable: result
+
+spotify_control:
+  alias: Control Spotify playback
+  description: >-
+    Pause, resume, skip, go back, fast forward or rewind whatever Spotify is playing (on the
+    phone or any speaker). Use for 'pause the music', 'next song', 'go back a song', 'skip ahead
+    30 seconds', 'rewind a bit'.
+  icon: mdi:play-pause
+  mode: queued
+  fields:
+    command:
+      name: Command
+      description: pause, resume, next, previous, forward or rewind.
+      required: true
+      selector:
+        select:
+          options: [pause, resume, next, previous, forward, rewind]
+    seconds:
+      name: Seconds
+      description: For forward/rewind, how far. Defaults to 30 forward, 15 back.
+      required: false
+      selector:
+        number:
+          min: 1
+          max: 600
+          unit_of_measurement: s
+  variables:
+    account: media_player.spotifyplus_YOUR_SPOTIFY_USERNAME
+    jump_ms: "{{ ((seconds | default(30 if command == 'forward' else 15)) | int) * 1000 }}"
+  sequence:
+    - choose:
+        - conditions:
+            - condition: template
+              value_template: "{{ command == 'pause' }}"
+          sequence:
+            - action: spotifyplus.player_media_pause
+              data:
+                entity_id: "{{ account }}"
+        - conditions:
+            - condition: template
+              value_template: "{{ command == 'resume' }}"
+          sequence:
+            - action: spotifyplus.player_media_resume
+              data:
+                entity_id: "{{ account }}"
+        - conditions:
+            - condition: template
+              value_template: "{{ command == 'next' }}"
+          sequence:
+            - action: spotifyplus.player_media_skip_next
+              data:
+                entity_id: "{{ account }}"
+        - conditions:
+            - condition: template
+              value_template: "{{ command == 'previous' }}"
+          sequence:
+            - action: spotifyplus.player_media_skip_previous
+              data:
+                entity_id: "{{ account }}"
+        - conditions:
+            - condition: template
+              value_template: "{{ command in ['forward', 'rewind'] }}"
+          sequence:
+            - action: spotifyplus.player_media_seek
+              data:
+                entity_id: "{{ account }}"
+                position_ms: 0
+                relative_position_ms: "{{ jump_ms if command == 'forward' else -jump_ms }}"
+    - variables:
+        result:
+          done: "{{ command }}"
+    - stop: Done
+      response_variable: result
+
+spotify_now_playing:
+  alias: What's playing on Spotify
+  description: >-
+    Tells what Spotify is playing right now: song, artist, album, where it's playing and how far
+    in. Use for 'what song is this', 'who sings this', 'what's playing'.
+  icon: mdi:music-note
+  mode: parallel
+  variables:
+    account: media_player.spotifyplus_YOUR_SPOTIFY_USERNAME
+  sequence:
+    - action: spotifyplus.get_player_playback_state
+      data:
+        entity_id: "{{ account }}"
+      response_variable: now
+    - variables:
+        track: "{{ now.result.item | default({}) }}"
+        result:
+          playing: "{{ now.result.is_playing | default(false) }}"
+          song: "{{ track.name | default('nothing') }}"
+          artist: "{{ track.artists | default([]) | map(attribute='name') | join(', ') }}"
+          album: "{{ track.album.name | default('') if track else '' }}"
+          device: "{{ now.result.device.name | default('') }}"
+          position: "{{ ((now.result.progress_ms | default(0)) / 1000) | int | timestamp_custom('%M:%S', false) }}"
+          uri: "{{ track.uri | default('') }}"
+    - stop: Done
+      response_variable: result
+
+spotify_add_to_playlist:
+  alias: Add a song to a Spotify playlist
+  description: >-
+    Add the song playing now, or a named song, to one of the user's Spotify playlists. Use for
+    'add this song to Road Trip', 'add Dare You by Papadosio to Road Trip'. Not for shopping or
+    to-do lists.
+  icon: mdi:playlist-plus
+  mode: queued
+  fields:
+    playlist:
+      name: Playlist
+      description: Name of the user's playlist, e.g. 'Road Trip'.
+      required: true
+      selector:
+        text: {}
+    song:
+      name: Song
+      description: Song with artist ('Dare You by Papadosio'). Leave empty for the song playing now.
+      required: false
+      selector:
+        text: {}
+  variables:
+    account: media_player.spotifyplus_YOUR_SPOTIFY_USERNAME
+    wanted_song: "{{ song | default('') | trim }}"
+  sequence:
+    - action: spotifyplus.get_playlist_favorites
+      data:
+        entity_id: "{{ account }}"
+        limit_total: 200
+        filter_criteria: "{{ playlist | regex_replace('(?i)^(my|the) | playlist$', '') }}"
+      response_variable: mine
+    - variables:
+        target: "{{ (mine.result['items'] | default([]) | first) or {} }}"
+    - if:
+        - condition: template
+          value_template: "{{ not target }}"
+      then:
+        - variables:
+            result:
+              error: "No playlist of yours called {{ playlist }}"
+        - stop: No playlist
+          response_variable: result
+    - if:
+        - condition: template
+          value_template: "{{ wanted_song == '' }}"
+      then:
+        - action: spotifyplus.get_player_now_playing
+          data:
+            entity_id: "{{ account }}"
+          response_variable: now
+        - variables:
+            track: "{{ now.result.item | default({}) }}"
+      else:
+        - action: spotifyplus.search_tracks
+          data:
+            entity_id: "{{ account }}"
+            criteria: >-
+              {% set parts = wanted_song.split(' by ', 1) %}{% if parts | length == 2 %}track:{{ parts[0] | trim }} artist:{{ parts[1] | trim }}{% else %}{{ wanted_song }}{% endif %}
+            limit: 1
+          response_variable: found
+        - variables:
+            track: "{{ (found.result['items'] | default([]) | first) or {} }}"
+    - if:
+        - condition: template
+          value_template: "{{ not track or not track.uri }}"
+      then:
+        - variables:
+            result:
+              error: Couldn't tell which song to add
+        - stop: No song
+          response_variable: result
+    - action: spotifyplus.playlist_items_add
+      data:
+        entity_id: "{{ account }}"
+        playlist_id: "{{ target.uri.split(':') | last }}"
+        uris: "{{ track.uri }}"
+    - variables:
+        result:
+          added: "{{ track.name }} by {{ track.artists | map(attribute='name') | join(', ') }}"
+          to: "{{ target.name }}"
+    - stop: Added
+      response_variable: result

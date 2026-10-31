@@ -207,8 +207,8 @@ private fun PhoneActionsSection(settings: HaSettings) {
             Text(
                 "Handle these on the phone instead of sending them to Home Assistant:\n" +
                     "• \"Take me to Target on Main Street\"\n" +
-                    "• \"Play my driving playlist on Spotify\" / \"Pause Spotify\" / \"Next song on Spotify\"\n" +
-                    "• \"Set a timer for 10 minutes\"",
+                    "• \"Set a timer for 10 minutes\"\n" +
+                    "Music (\"play … on Spotify\") goes to Home Assistant; see the README for SpotifyPlus.",
                 style = MaterialTheme.typography.bodySmall,
             )
         }

@@ -6,6 +6,13 @@ import android.content.Context
 class HaSettings(context: Context) {
     private val prefs = context.getSharedPreferences("ha_connection", Context.MODE_PRIVATE)
 
+    init {
+        // Spotify used to be handled in the app (its own sign-in and search keys); it now goes
+        // through Home Assistant, so remove what an older version may have saved.
+        val leftovers = prefs.all.keys.filter { it.startsWith("spotify_") }
+        if (leftovers.isNotEmpty()) prefs.edit().apply { leftovers.forEach { remove(it) } }.apply()
+    }
+
     var baseUrl: String
         get() = prefs.getString("base_url", "").orEmpty()
         set(value) = prefs.edit().putString("base_url", value.trim().trimEnd('/')).apply()
@@ -24,7 +31,7 @@ class HaSettings(context: Context) {
         get() = prefs.getBoolean("hands_free", true)
         set(value) = prefs.edit().putBoolean("hands_free", value).apply()
 
-    /** Navigation, music and timers handled on the phone instead of by Home Assistant. */
+    /** Navigation and timers handled on the phone instead of by Home Assistant. */
     var phoneActions: Boolean
         get() = prefs.getBoolean("phone_actions", true)
         set(value) = prefs.edit().putBoolean("phone_actions", value).apply()

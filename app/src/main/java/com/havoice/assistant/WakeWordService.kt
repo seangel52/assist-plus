@@ -103,7 +103,7 @@ class WakeWordService : Service(), SensorEventListener {
             return START_NOT_STICKY
         }
         startMotionWatch()
-        startListening()
+        if (intent?.action == ACTION_START_PAUSED) updateNotification("Paused while Assist is open") else startListening()
         return START_STICKY
     }
 
@@ -262,6 +262,7 @@ class WakeWordService : Service(), SensorEventListener {
         private const val ACTION_STOP = "stop"
         private const val ACTION_PAUSE = "pause"
         private const val ACTION_RESUME = "resume"
+        private const val ACTION_START_PAUSED = "start_paused"
         private const val BATTERY_LOG_MS = 30 * 60_000L
         private const val MOTION_BATCH_US = 10_000_000
         private const val MOVEMENT_THRESHOLD = 0.6f
@@ -292,6 +293,23 @@ class WakeWordService : Service(), SensorEventListener {
             } catch (e: RuntimeException) {
                 AppLog.w("Wake word couldn't start: ${e.javaClass.simpleName}")
                 offerRestart(context)
+            }
+        }
+
+        /**
+         * Starts the service without listening yet, from the open Assist sheet: Android only lets
+         * a microphone service start while the app is on screen, so this is how listening comes
+         * back after an app update or the app being closed. Listening starts when Assist closes.
+         */
+        fun startPaused(context: Context) {
+            if (running != null || !HaSettings(context).wakeEnabled) return
+            try {
+                ContextCompat.startForegroundService(
+                    context,
+                    Intent(context, WakeWordService::class.java).setAction(ACTION_START_PAUSED),
+                )
+            } catch (e: RuntimeException) {
+                AppLog.w("Wake word couldn't start: ${e.javaClass.simpleName}")
             }
         }
 

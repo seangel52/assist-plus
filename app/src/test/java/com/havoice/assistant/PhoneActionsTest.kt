@@ -1,6 +1,5 @@
 package com.havoice.assistant
 
-import android.view.KeyEvent
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
@@ -67,17 +66,6 @@ class PhoneActionsTest {
     }
 
     @Test
-    fun music() {
-        assertEquals(PhoneAction.Play("my driving playlist", MusicApp.SPOTIFY), parse("Play my driving playlist on Spotify."))
-        assertEquals(PhoneAction.Play("Taylor Swift", MusicApp.YOUTUBE_MUSIC), parse("play Taylor Swift on YouTube Music"))
-        assertEquals(PhoneAction.Play("some jazz", MusicApp.SPOTIFY), parse("Spotify, play some jazz"))
-        assertEquals(PhoneAction.Play("", MusicApp.SPOTIFY), parse("Resume Spotify."))
-        assertEquals(PhoneAction.MediaKey(KeyEvent.KEYCODE_MEDIA_PAUSE, MusicApp.SPOTIFY), parse("Pause Spotify."))
-        assertEquals(PhoneAction.MediaKey(KeyEvent.KEYCODE_MEDIA_NEXT, MusicApp.SPOTIFY), parse("Skip this song on Spotify"))
-        assertEquals(PhoneAction.MediaKey(KeyEvent.KEYCODE_MEDIA_PREVIOUS, MusicApp.SPOTIFY), parse("go back a song on spotify"))
-    }
-
-    @Test
     fun timers() {
         assertEquals(PhoneAction.Timer(600), parse("Set a timer for 10 minutes."))
         assertEquals(PhoneAction.Timer(1500), parse("set a timer for twenty-five minutes"))
@@ -103,6 +91,10 @@ class PhoneActionsTest {
             "Play some jazz in the kitchen",
             "Add take me to the store to my notes",
             "set a timer",
+            // Music is Home Assistant's (SpotifyPlus scripts), on the phone or any speaker.
+            "Play Dare You by Papadosio on Spotify",
+            "Pause Spotify",
+            "Add this song to Road Trip",
         ).forEach { assertNull(it, parse(it)) }
     }
 }

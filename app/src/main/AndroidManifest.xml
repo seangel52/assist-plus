@@ -13,11 +13,9 @@
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
-    <!-- Phone actions: setting timers in the clock app, and opening the music and maps apps. -->
+    <!-- Phone actions: setting timers in the clock app, and opening the maps apps. -->
     <uses-permission android:name="com.android.alarm.permission.SET_ALARM" />
     <queries>
-        <package android:name="com.spotify.music" />
-        <package android:name="com.google.android.apps.youtube.music" />
         <package android:name="com.google.android.apps.maps" />
         <package android:name="com.waze" />
     </queries>
@@ -49,6 +47,7 @@
             android:excludeFromRecents="true"
             android:exported="true"
             android:launchMode="singleTask"
+            android:showWhenLocked="true"
             android:taskAffinity=""
             android:theme="@style/Theme.HaVoice.Overlay"
             android:windowSoftInputMode="adjustResize">

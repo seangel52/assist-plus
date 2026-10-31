@@ -203,8 +203,9 @@ class AssistActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         settings = HaSettings(this)
-        // The wake word listener lets go of the mic while the sheet is open.
-        WakeWordService.pause(this)
+        // The wake word listener lets go of the mic while the sheet is open. If it isn't running
+        // (stopped by an app update), it starts now and listens once the sheet closes.
+        if (WakeWordService.isRunning) WakeWordService.pause(this) else WakeWordService.startPaused(this)
         intent.getStringExtra(EXTRA_FROM_WAKE_WORD)
             ?.takeIf { intent.getStringExtra(EXTRA_WAKE_TOKEN) == WakeWordService.LAUNCH_TOKEN }
             ?.let { phrase ->
@@ -214,6 +215,10 @@ class AssistActivity : ComponentActivity() {
                 setTurnScreenOn(true)
             }
         }
+        // The manifest lets the sheet show over the lock screen (holding the side button, as in the
+        // Companion app; Android decides that before this code runs). The phone stays locked:
+        // anything that opens another app asks to unlock first, and the spoken PIN still applies.
+        // Wake word launches on a locked phone are only made with "Work when locked" on.
         AppLog.i(
             "Assist opened (noise ${settings.noiseReduction}, hands-free ${settings.handsFree}, " +
                 "voice ID ${if (voiceProfile() != null) "on" else "off"})",
@@ -260,6 +265,9 @@ class AssistActivity : ComponentActivity() {
             }
         }
         handleShare(intent)
+        // Development only: "adb shell am start -n com.havoice.assistant/.AssistActivity --es debug_request '…'"
+        // runs a typed request, so phone actions can be tested from a computer. Not in release builds.
+        if (BuildConfig.DEBUG) intent.getStringExtra(EXTRA_DEBUG_REQUEST)?.let(::send)
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -397,6 +405,7 @@ class AssistActivity : ComponentActivity() {
         /** Set (to the phrase heard) when the wake word listener opened the sheet. */
         const val EXTRA_FROM_WAKE_WORD = "from_wake_word"
         const val EXTRA_WAKE_TOKEN = "wake_token"
+        private const val EXTRA_DEBUG_REQUEST = "debug_request"
 
         // Answers to "Did you mean …?" about an address.
         private val YES_WORDS = setOf(
@@ -642,8 +651,6 @@ class AssistActivity : ComponentActivity() {
             messages += AssistMessage(saying, isInput = false)
             if (currentPipeline?.supportsSpeech == true) say(saying)
         }
-        // Music needs the audio Assist is holding; a pause key goes out first, while it's still held.
-        if (todo is PhoneAction.Play) audioManager.abandonAudioFocusRequest(audioFocus)
         val problem = PhoneActions.start(this, todo)
         if (problem != null) {
             AppLog.w("Phone action failed: $problem")
