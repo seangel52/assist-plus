@@ -2,6 +2,8 @@
 
 **A better voice client for Home Assistant's Assist on Android.** It keeps Home Assistant's own assistant and makes talking to it work in a real, noisy home: it listens on the phone, isolates *your* voice from the TV and the kids, shows your words as you speak, and lets you hand it photos, files and barcodes.
 
+> **Why this exists:** to show, with real working examples, what a phone voice assistant for Home Assistant *could* be — and to inspire others to build on it. Take any idea here, use the code, fork it, improve it, or bring it to the [official Companion app](https://github.com/home-assistant/android). You don't need to ask; that's the point.
+
 <p>
   <img src="docs/screenshots/assist-sheet.png" width="360" alt="The Assist sheet listening">
 </p>
@@ -12,7 +14,7 @@
   <img src="docs/screenshots/settings-noise.png" width="200" alt="Noise reduction settings">
 </p>
 
-> I built this with Claude because I wanted the Assist experience to work for my family. I'm not a professional Android developer, so it isn't on the Play Store. It's fully open source: install the APK yourself, read the code, have Claude (or any AI) review it, and improve it. I'd love for ideas from here to make it into the official Companion app.
+I built this with Claude because I wanted the Assist experience to work for my family. I'm not a professional Android developer, so it isn't on the Play Store — it's a working proof of concept you can install yourself. Everything is open source (Apache-2.0): read the code, have Claude or any AI review it, and build something better.
 
 ## What it does
 
