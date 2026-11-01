@@ -111,8 +111,11 @@ import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 
 data class AssistMessage(
     val message: String,
@@ -140,6 +143,9 @@ class AssistActivity : ComponentActivity() {
     private var voiceJob: Job? = null
     private var idleWakeJob: Job? = null
     private var stopSignal: CompletableDeferred<Unit>? = null
+
+    // Set while a reply is being spoken; completing it cuts the reply short (see say).
+    private var interruptSpeech: CompletableDeferred<Unit>? = null
 
     private val messages = mutableStateListOf(AssistMessage(WELCOME, isInput = false))
     private var pipelines by mutableStateOf<List<Pipeline>>(emptyList())
@@ -229,6 +235,8 @@ class AssistActivity : ComponentActivity() {
             SpeechEngines.get(applicationContext)
             if (voiceProfile() != null) VoiceIsolator.get(applicationContext)
         }
+        // Look up the city while the user speaks; the note is cached for the request.
+        lifecycleScope.launch { locationNote() }
         if (settings.isConfigured) {
             loadPipelines()
         } else {
@@ -307,11 +315,16 @@ class AssistActivity : ComponentActivity() {
             AttachKind.BARCODE -> GmsBarcodeScanning.getClient(this).startScan()
                 .addOnSuccessListener { barcode ->
                     usingOtherScreen = false
+                    backToSheet()
                     barcode.rawValue?.let { value -> prepare { listOf(Attachment.Barcode(Attachments.scanned(value))) } }
                 }
-                .addOnCanceledListener { usingOtherScreen = false }
+                .addOnCanceledListener {
+                    usingOtherScreen = false
+                    backToSheet()
+                }
                 .addOnFailureListener { e ->
                     usingOtherScreen = false
+                    backToSheet()
                     AppLog.w("Barcode scanner failed: ${e.message}")
                     messages += AssistMessage("Barcode scanner: ${e.message}", isInput = false, isError = true)
                 }
@@ -385,6 +398,46 @@ class AssistActivity : ComponentActivity() {
     }
 
     /** What the owner's bubble shows: their words, plus what was attached. */
+    /** Takes the agent's "[heard: X -> Y]" tags out of [reply] and adds those names to listen for. */
+    private fun learnNames(reply: String): String {
+        val (clean, learned) = NameCorrections.strip(reply)
+        NameCorrections.record(settings, learned)
+        return clean
+    }
+
+    /** The hidden location note for a request (Settings → Assistant), or nothing. */
+    private suspend fun locationNote(): String {
+        val note = try {
+            withTimeoutOrNull(3_000) { PhoneLocation.contextNote(applicationContext, settings.locationSharing) }
+        } catch (e: SecurityException) {
+            null
+        }
+        return if (note.isNullOrEmpty()) "" else "\n\n$note"
+    }
+
+    /**
+     * Google's barcode scanner opens in the app's main task, so closing it shows Settings;
+     * bring the Assist sheet (its own task) back to the front.
+     */
+    private fun backToSheet() {
+        startActivity(Intent(this, AssistActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+    }
+
+    /**
+     * Puts [message] in bubble [index], or adds it at the end if that bubble is gone (opening
+     * the photo picker while a reply is on its way clears the waiting bubble).
+     */
+    private fun setMessage(index: Int, message: AssistMessage) {
+        if (index in messages.indices) messages[index] = message else messages += message
+    }
+
+    /** Shows what the assistant is doing ("Logging…") in its waiting bubble; never spoken. */
+    private fun showStatus(index: Int, status: String) {
+        if (messages.getOrNull(index)?.let { it.isPlaceholder && !it.isInput } == true) {
+            messages[index] = AssistMessage(status, isInput = false, isPlaceholder = true)
+        }
+    }
+
     private fun inputBubble(request: String): String {
         if (attachments.isEmpty()) return request
         val list = "📎 " + attachments.joinToString(", ") { it.label }
@@ -501,8 +554,34 @@ class AssistActivity : ComponentActivity() {
         return true
     }
 
+    /**
+     * Speaks [text]. The wake phrase in the owner's voice, or a mic tap, cuts it short and
+     * listens once the caller is done; true if that happened. Other voices (including the
+     * reply itself) don't interrupt.
+     */
+    private suspend fun say(text: String): Boolean {
+        val caller = currentCoroutineContext()[Job]
+        val cut = CompletableDeferred<Unit>().also { interruptSpeech = it }
+        coroutineScope {
+            val speech = launch { speak(text) }
+            val watcher = launch {
+                launch { if (awaitOwnerWake("while speaking")) cut.complete(Unit) }
+                cut.await()
+                speech.cancel()
+            }
+            speech.join()
+            watcher.cancel()
+        }
+        interruptSpeech = null
+        if (!cut.isCompleted) return false
+        AppLog.i("Reply cut short; listening")
+        beep()
+        listenAfter(caller)
+        return true
+    }
+
     /** Speaks [text] in the pipeline's own voice, or the phone's voice if Home Assistant can't. */
-    private suspend fun say(text: String) {
+    private suspend fun speak(text: String) {
         val url = currentPipeline?.let { pipeline ->
             try {
                 connectedClient().speechUrl(pipeline, text)
@@ -510,7 +589,8 @@ class AssistActivity : ComponentActivity() {
                 null
             }
         }
-        if (url != null) player.play(url) else sayOnPhone(text)
+        // If Home Assistant's audio can't be played (no voice set up, or unreachable), the phone speaks.
+        if (url == null || !player.play(url)) sayOnPhone(text)
     }
 
     private suspend fun sayOnPhone(text: String) = suspendCancellableCoroutine { continuation ->
@@ -580,11 +660,13 @@ class AssistActivity : ComponentActivity() {
         val started = System.currentTimeMillis()
         lifecycleScope.launch {
             var closing = false
-            messages[replyIndex] = try {
-                val message = withAttachments(text)
-                val reply = connectedClient().runIntent(message, conversationId, currentPipeline, speak = false)
+            val answer = try {
+                val message = withAttachments(text) + locationNote()
+                val reply = connectedClient().runIntent(message, conversationId, currentPipeline, speak = false) { status ->
+                    showStatus(replyIndex, status)
+                }
                 conversationId = reply.conversationId
-                val (shown, agentEnded) = ExitWords.stripEndTag(reply.speech)
+                val (shown, agentEnded) = ExitWords.stripEndTag(learnNames(reply.speech))
                 closing = agentEnded || exit == ExitWords.Kind.GOODBYE
                 AppLog.i("Typed ${quote(text)} → reply in ${System.currentTimeMillis() - started} ms: ${quote(shown)}")
                 AssistMessage(shown.ifBlank { "Done." }, isInput = false)
@@ -595,6 +677,7 @@ class AssistActivity : ComponentActivity() {
             } finally {
                 busy = false
             }
+            setMessage(replyIndex, answer)
             syncLog()
             if (closing) {
                 // Leave the sign-off on screen for a moment before closing.
@@ -622,7 +705,7 @@ class AssistActivity : ComponentActivity() {
         var todo = action
         var saying = confirmed
         if (action is PhoneAction.Navigate && confirmed == null && AddressCheck.needsCheck(action.place)) {
-            val result = AddressCheck.check(this, action.place, homeLocation())
+            val result = AddressCheck.check(this, action.place, searchCenter())
             AppLog.i("Address check for ${quote(action.place)}: $result")
             when (result) {
                 is AddressCheck.Result.Found -> if (result.sure) {
@@ -725,6 +808,16 @@ class AssistActivity : ComponentActivity() {
         return home
     }
 
+    /** Where addresses are looked up around: the phone, if location is allowed, else home. */
+    private suspend fun searchCenter(): Pair<Double, Double>? {
+        val phone = try {
+            PhoneLocation.current(applicationContext)
+        } catch (e: SecurityException) {
+            null
+        }
+        return phone?.let { it.latitude to it.longitude } ?: homeLocation()
+    }
+
     /** Listens for an answer once [run] (the current listening run) has finished. */
     private fun listenAfter(run: Job?) {
         lifecycleScope.launch {
@@ -756,7 +849,11 @@ class AssistActivity : ComponentActivity() {
     }
 
     private fun toggleListening() {
-        if (inputMode == InputMode.VOICE_ACTIVE) {
+        val speaking = interruptSpeech
+        if (speaking != null) {
+            // Tapping the mic while a reply plays stops it and listens.
+            speaking.complete(Unit)
+        } else if (inputMode == InputMode.VOICE_ACTIVE) {
             // Tapping the mic while listening finishes the command now.
             stopSignal?.complete(Unit)
         } else {
@@ -818,12 +915,13 @@ class AssistActivity : ComponentActivity() {
                     expectingAnswer = followUp,
                     endPauseSeconds = settings.endPauseSeconds,
                     keepPrivate = forPin,
+                    hotwords = NameSteering.hotwords(applicationContext, NameCorrections.names(settings)),
                 )
                 val capture = if (settings.saveRecordings && !forPin) Captures.Recorder() else null
                 val result = listener.listen(MicRecorder.frames(applicationContext, noise, capture), stop) { live ->
                     runOnUiThread {
                         val shown = if (forPin && live.isNotEmpty()) "••••" else live
-                        if (showLive) messages[inputIndex] = AssistMessage(shown, isInput = true, isPlaceholder = live.isEmpty())
+                        if (showLive) setMessage(inputIndex, AssistMessage(shown, isInput = true, isPlaceholder = live.isEmpty()))
                     }
                 }
                 showLive = false
@@ -832,11 +930,11 @@ class AssistActivity : ComponentActivity() {
                 val command = result.command
                 if (command == null) {
                     val notice = if (forPin) "Didn't catch that. Say your PIN again." else notHeardMessage(result, threshold)
-                    messages[inputIndex] = AssistMessage(notice, isInput = false, isError = true)
+                    setMessage(inputIndex, AssistMessage(notice, isInput = false, isError = true))
                     return@launch
                 }
                 if (forPin) {
-                    messages[inputIndex] = AssistMessage("••••", isInput = true)
+                    setMessage(inputIndex, AssistMessage("••••", isInput = true))
                     if (handlePin(command.text)) {
                         // Listen for the request (or another try) once this listening run has ended.
                         val thisRun = coroutineContext[Job]
@@ -853,12 +951,12 @@ class AssistActivity : ComponentActivity() {
                 if (exit == ExitWords.Kind.CANCEL) {
                     // "cancel", "never mind", "stop": close without asking Home Assistant.
                     AppLog.i("Voice: ${quote(text)} — closing Assist")
-                    messages[inputIndex] = AssistMessage(text, isInput = true)
+                    setMessage(inputIndex, AssistMessage(text, isInput = true))
                     finish()
                     return@launch
                 }
                 val heardAt = elapsed()
-                messages[inputIndex] = AssistMessage(inputBubble(text), isInput = true)
+                setMessage(inputIndex, AssistMessage(inputBubble(text), isInput = true))
                 pendingNavigation?.let { pending ->
                     // The answer to "Did you mean …?" about an address.
                     pendingNavigation = null
@@ -876,12 +974,14 @@ class AssistActivity : ComponentActivity() {
                 messages += AssistMessage("", isInput = false, isPlaceholder = true)
                 replyIndex = messages.lastIndex
 
-                val message = withAttachments(text)
+                val message = withAttachments(text) + locationNote()
                 // The reply is spoken by the app (in the pipeline's voice) rather than by the
                 // pipeline, so the agent's "[end]" tag can be taken out first.
-                val reply = connectedClient().runIntent(message, conversationId, pipeline, speak = false)
+                val reply = connectedClient().runIntent(message, conversationId, pipeline, speak = false) { status ->
+                    showStatus(replyIndex, status)
+                }
                 conversationId = reply.conversationId
-                val (spoken, agentEnded) = ExitWords.stripEndTag(reply.speech)
+                val (spoken, agentEnded) = ExitWords.stripEndTag(learnNames(reply.speech))
                 val closing = agentEnded || exit == ExitWords.Kind.GOODBYE
                 AppLog.i(
                     "Voice (noise $noise): sent ${quote(text)} at ${heardAt} ms " +
@@ -890,9 +990,10 @@ class AssistActivity : ComponentActivity() {
                         (if (reply.continueConversation) " [follow-up]" else "") +
                         if (closing) " [closing]" else "",
                 )
-                messages[replyIndex] = AssistMessage(spoken.ifBlank { "Done." }, isInput = false)
+                setMessage(replyIndex, AssistMessage(spoken.ifBlank { "Done." }, isInput = false))
                 syncLog()
-                if (pipeline.supportsSpeech && spoken.isNotBlank()) say(spoken)
+                val interrupted = pipeline.supportsSpeech && spoken.isNotBlank() && say(spoken)
+                if (interrupted) return@launch
                 if (closing) {
                     finish()
                     return@launch
@@ -908,8 +1009,8 @@ class AssistActivity : ComponentActivity() {
                 dropConnection()
                 val error = AssistMessage(e.message.orEmpty(), isInput = false, isError = true)
                 when {
-                    replyIndex >= 0 -> messages[replyIndex] = error
-                    messages.getOrNull(inputIndex)?.isPlaceholder == true -> messages[inputIndex] = error
+                    replyIndex >= 0 -> setMessage(replyIndex, error)
+                    messages.getOrNull(inputIndex)?.isPlaceholder == true -> setMessage(inputIndex, error)
                     else -> messages += error
                 }
             } finally {
@@ -933,21 +1034,28 @@ class AssistActivity : ComponentActivity() {
         if (!settings.wakeEnabled || isFinishing || idleWakeJob?.isActive == true || voiceJob?.isActive == true) return
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) return
         idleWakeJob = lifecycleScope.launch {
-            val phrases = WakeWords.load(settings)
-            while (true) {
-                val (phrase, audio) = WakeWords.awaitWake(applicationContext, phrases, settings.wakeSensitivity) ?: return@launch
-                val (mine, score) = withContext(Dispatchers.Default) {
-                    WakeWords.voiceMatches(applicationContext, settings, phrase, audio)
-                }
-                AppLog.i(
-                    "Wake word \"${phrase.text}\" heard in the open sheet" +
-                        (score?.let { ", voice %.2f".format(it) } ?: "") + if (mine) "" else " — not your voice; ignored",
-                )
-                if (mine) break
-            }
+            if (!awaitOwnerWake("in the open sheet")) return@launch
             idleWakeJob = null
             beep()
             requestListening()
+        }
+    }
+
+    /** Waits for the wake phrase in the owner's voice; false if wake words are off or the mic can't be used. */
+    private suspend fun awaitOwnerWake(where: String): Boolean {
+        if (!settings.wakeEnabled) return false
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) return false
+        val phrases = WakeWords.load(settings)
+        while (true) {
+            val (phrase, audio) = WakeWords.awaitWake(applicationContext, phrases, settings.wakeSensitivity) ?: return false
+            val (mine, score) = withContext(Dispatchers.Default) {
+                WakeWords.voiceMatches(applicationContext, settings, phrase, audio)
+            }
+            AppLog.i(
+                "Wake word \"${phrase.text}\" heard $where" +
+                    (score?.let { ", voice %.2f".format(it) } ?: "") + if (mine) "" else " — not your voice; ignored",
+            )
+            if (mine) return true
         }
     }
 
@@ -1228,7 +1336,18 @@ private fun SpeechBubble(
                     label = "bubbleContent",
                 ) { placeholder ->
                     if (placeholder) {
-                        TypingIndicator(color = content)
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            TypingIndicator(color = content)
+                            // A status like "Logging…" while the assistant works; the reply replaces it.
+                            if (message.message.isNotEmpty() && !message.isInput) {
+                                Text(
+                                    text = message.message,
+                                    style = HaText.Body,
+                                    color = content.copy(alpha = 0.6f),
+                                    modifier = Modifier.padding(start = HaDimens.Space2),
+                                )
+                            }
+                        }
                     } else {
                         Text(text = message.message, style = HaText.Body, color = content)
                     }

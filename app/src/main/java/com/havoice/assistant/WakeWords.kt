@@ -5,6 +5,7 @@ import android.content.Context
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
+import android.media.audiofx.AcousticEchoCanceler
 import android.os.Build
 import com.k2fsa.sherpa.onnx.FeatureConfig
 import kotlinx.coroutines.Dispatchers
@@ -88,7 +89,9 @@ object WakeWords {
         val spec = spec(context, phrases, sensitivity)
         if (spec.isEmpty()) return@withContext null
         val rate = MicRecorder.SAMPLE_RATE
-        val chunk = MicRecorder.CHUNK_BYTES
+        // A fifth of a second per read: the processor wakes 5 times a second instead of 25,
+        // which matters for a listener that runs all day. Detection is no slower to notice.
+        val chunk = MicRecorder.CHUNK_BYTES * 5
         val record = AudioRecord(
             MediaRecorder.AudioSource.VOICE_RECOGNITION,
             rate,
@@ -96,7 +99,15 @@ object WakeWords {
             AudioFormat.ENCODING_PCM_16BIT,
             maxOf(AudioRecord.getMinBufferSize(rate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT), chunk * 4),
         )
+        // Music or a video playing from this phone comes straight back into its mic and buries
+        // the wake phrase; the phone's echo canceller subtracts its own sound.
+        val echoCanceller = if (AcousticEchoCanceler.isAvailable()) {
+            AcousticEchoCanceler.create(record.audioSessionId)?.apply { enabled = true }
+        } else {
+            null
+        }
         val stream = spotter.createStream(spec)
+        val gate = SoundGate()
         val recent = FloatArray(rate * 2)
         var recentPos = 0
         // Android hands a background app silence while another app has the microphone; note it in the log.
@@ -123,21 +134,27 @@ object WakeWords {
                     recent[recentPos] = s
                     recentPos = (recentPos + 1) % recent.size
                 }
-                stream.acceptWaveform(samples, rate)
-                while (spotter.isReady(stream)) {
-                    spotter.decode(stream)
-                    val label = spotter.getResult(stream).keyword
-                    if (label.isNotEmpty()) {
-                        val phrase = phrases.getOrNull(label.toIntOrNull() ?: -1) ?: continue
-                        return@withContext phrase to (recent.copyOfRange(recentPos, recent.size) + recent.copyOfRange(0, recentPos))
+                // The model only runs while there's sound worth checking; a quiet room costs
+                // almost nothing (it was most of the listener's battery use).
+                for (piece in gate.offer(samples)) {
+                    stream.acceptWaveform(piece, rate)
+                    while (spotter.isReady(stream)) {
+                        spotter.decode(stream)
+                        val label = spotter.getResult(stream).keyword
+                        if (label.isNotEmpty()) {
+                            val phrase = phrases.getOrNull(label.toIntOrNull() ?: -1) ?: continue
+                            return@withContext phrase to (recent.copyOfRange(recentPos, recent.size) + recent.copyOfRange(0, recentPos))
+                        }
                     }
                 }
+                soundShare = gate.share
                 onTick()
             }
             null
         } finally {
             stream.release()
             record.stop()
+            echoCanceller?.release()
             record.release()
         }
     }
@@ -162,8 +179,13 @@ object WakeWords {
     // In noisy rooms the owner's wake phrase has scored as low as 0.23.
     private const val WAKE_VOICE_MIN = 0.15f
 
-    // About every 2 seconds (40 ms chunks).
-    private const val SILENCE_CHECK_CHUNKS = 50
+    // About every 2 seconds (200 ms reads).
+    private const val SILENCE_CHECK_CHUNKS = 10
+
+    /** Share of time the current listening session ran the model (had sound), for the battery log. */
+    @Volatile
+    var soundShare = 0f
+        private set
 
     /**
      * Tunes a phrase from the owner saying it several times: picks the strictest trigger

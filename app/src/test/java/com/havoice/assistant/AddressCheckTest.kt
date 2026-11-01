@@ -51,4 +51,20 @@ class AddressCheckTest {
         assertEquals("3140 East Oakland Street, Springfield", oak.spoken)
         assertEquals("3140 East Oakland Street, Springfield, Illinois", oak.query)
     }
+
+    @Test
+    fun cityIsNamedOnlyAfterTheStreet() {
+        assertEquals(false, AddressCheck.namesCity("3140 East Oakland Street"))
+        assertEquals(false, AddressCheck.namesCity("3140 East Oakland Street."))
+        assertEquals(true, AddressCheck.namesCity("3140 East Oakland Street Springfield"))
+        assertEquals(true, AddressCheck.namesCity("3140 East Oakland, Springfield"))
+    }
+
+    @Test
+    fun distanceBetweenCities() {
+        // Chicago to New York is about 1,145 km; across town is a few.
+        val km = AddressCheck.kilometers(41.878, -87.630, 40.713, -74.006)
+        assertEquals(1145.0, km, 20.0)
+        assertEquals(5.0, AddressCheck.kilometers(41.878, -87.630, 41.923, -87.630), 0.2)
+    }
 }

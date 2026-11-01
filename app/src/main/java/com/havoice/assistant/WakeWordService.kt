@@ -141,7 +141,10 @@ class WakeWordService : Service(), SensorEventListener {
                 val (phrase, audio) = WakeWords.awaitWake(applicationContext, phrases, settings.wakeSensitivity) {
                     if (SystemClock.elapsedRealtime() > nextBatteryLog) {
                         nextBatteryLog += BATTERY_LOG_MS
-                        AppLog.i("Wake word still listening (battery ${batteryPercent()}%)")
+                        AppLog.i(
+                            "Wake word still listening (battery ${batteryPercent()}%, " +
+                                "sound to check ${(WakeWords.soundShare * 100).toInt()}% of the time)",
+                        )
                     }
                 } ?: return@launch
                 if (accept(phrase, audio)) {
@@ -204,7 +207,8 @@ class WakeWordService : Service(), SensorEventListener {
             while (isActive) {
                 delay(60_000)
                 val stillFor = SystemClock.elapsedRealtime() - lastMovedAt
-                if (!sleeping && listenJob?.isActive == true && stillFor > settings.wakeStillMinutes * 60_000L) {
+                // On the charger battery doesn't matter, so keep listening (a phone on the nightstand).
+                if (!sleeping && listenJob?.isActive == true && !charging() && stillFor > settings.wakeStillMinutes * 60_000L) {
                     sleeping = true
                     stopListening()
                     updateNotification("Sleeping — phone hasn't moved in ${settings.wakeStillMinutes} min")
@@ -232,6 +236,8 @@ class WakeWordService : Service(), SensorEventListener {
     override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) = Unit
 
     private fun batteryPercent() = getSystemService(BatteryManager::class.java).getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY)
+
+    private fun charging() = getSystemService(BatteryManager::class.java).isCharging
 
     private fun updateNotification(text: String) {
         getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, notification(text))

@@ -30,7 +30,11 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.ScrollableTabRow
 import androidx.compose.material3.Slider
+import androidx.compose.material3.Tab
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.material3.Switch
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.LaunchedEffect
@@ -681,7 +685,7 @@ private fun WakeWordSection(settings: HaSettings) {
     Option(
         "Sleep when the phone is still",
         "Stops listening after ${settings.wakeStillMinutes} minutes without moving, to save battery. " +
-            "It won't hear you while asleep; picking the phone up wakes it.",
+            "It won't hear you while asleep; picking the phone up wakes it. Keeps listening while charging.",
         sleepWhenStill,
     ) {
         sleepWhenStill = it
@@ -765,16 +769,26 @@ private fun SettingsScreen(
     var status by remember { mutableStateOf<String?>(null) }
     var testing by remember { mutableStateOf(false) }
 
+    var tab by rememberSaveable { mutableIntStateOf(0) }
     Scaffold { padding ->
+      Column(modifier = Modifier.fillMaxSize().padding(padding)) {
+        Column(modifier = Modifier.padding(start = 20.dp, end = 20.dp, top = 16.dp)) {
+            Text("Assist Plus", style = HaText.HeadlineMedium, color = LocalHaColors.current.textPrimary)
+        }
+        ScrollableTabRow(selectedTabIndex = tab, edgePadding = 12.dp) {
+            SETTINGS_TABS.forEachIndexed { i, name ->
+                Tab(selected = tab == i, onClick = { tab = i }, text = { Text(name) })
+            }
+        }
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(padding)
                 .padding(horizontal = 20.dp, vertical = 16.dp)
                 .verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
-            Text("Assist Plus", style = HaText.HeadlineMedium, color = LocalHaColors.current.textPrimary)
+          when (tab) {
+          0 -> {
             Text(
                 "Connects to your Home Assistant's Assist. Long-press the power or home button " +
                     "to talk to it from anywhere.",
@@ -856,6 +870,19 @@ private fun SettingsScreen(
             }
 
             HorizontalDivider()
+            Text("Default assistant", style = MaterialTheme.typography.titleMedium)
+            Text(
+                if (isDefaultAssistant) {
+                    "Assist Plus is your default digital assistant."
+                } else {
+                    "Not set yet. Open Default apps → Digital assistant app and choose Assist Plus."
+                },
+            )
+            OutlinedButton(onClick = onOpenDefaultApps, modifier = Modifier.fillMaxWidth()) {
+                Text("Open default apps settings")
+            }
+          }
+          1 -> {
             var handsFree by remember { mutableStateOf(settings.handsFree) }
             Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
                 Column(modifier = Modifier.weight(1f)) {
@@ -911,31 +938,99 @@ private fun SettingsScreen(
             )
 
             HorizontalDivider()
-            PhoneActionsSection(settings)
+            NamesSection(settings)
 
             HorizontalDivider()
             VoiceIdSection(settings)
-
+          }
+          2 -> WakeWordSection(settings)
+          3 -> {
+            PhoneActionsSection(settings)
             HorizontalDivider()
-            WakeWordSection(settings)
-
-            HorizontalDivider()
+            LocationSection(settings)
+          }
+          else -> {
             NoiseSection(settings)
-
             HorizontalDivider()
             LogSection(settings)
+          }
+          }
+        }
+      }
+    }
+}
 
-            HorizontalDivider()
-            Text("Default assistant", style = MaterialTheme.typography.titleMedium)
-            Text(
-                if (isDefaultAssistant) {
-                    "Assist Plus is your default digital assistant."
-                } else {
-                    "Not set yet. Open Default apps → Digital assistant app and choose Assist Plus."
-                },
-            )
-            OutlinedButton(onClick = onOpenDefaultApps, modifier = Modifier.fillMaxWidth()) {
-                Text("Open default apps settings")
+private val SETTINGS_TABS = listOf("Connection", "Listening", "Wake word", "Assistant", "Advanced")
+
+/** Names the speech recognizer leans toward, and the corrections that taught it. */
+@Composable
+private fun NamesSection(settings: HaSettings) {
+    var names by remember { mutableStateOf(settings.listenNames) }
+    var corrections by remember { mutableStateOf(NameCorrections.load(settings)) }
+    Text("Names to listen for", style = MaterialTheme.typography.titleMedium)
+    OutlinedTextField(
+        value = names,
+        onValueChange = {
+            names = it
+            settings.listenNames = it
+        },
+        placeholder = { Text("Riley\nMarlon") },
+        minLines = 3,
+        modifier = Modifier.fillMaxWidth(),
+    )
+    Text(
+        "One per line: people, pets, places, device names. When a word sounds like one of these, " +
+            "the speech recognizer leans toward it; a clearly different word stays as said. The " +
+            "assistant adds names here when you correct a mishearing.",
+        style = MaterialTheme.typography.bodySmall,
+    )
+    if (corrections.isNotEmpty()) {
+        Text("Corrections learned", style = MaterialTheme.typography.bodyMedium)
+        corrections.forEach { c ->
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                Text("${c.heard} → ${c.meant}", modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
+                TextButton(onClick = {
+                    NameCorrections.remove(settings, c)
+                    corrections = NameCorrections.load(settings)
+                }) { Text("Remove") }
+            }
+        }
+    }
+}
+
+/** What location, if any, goes along with each request. */
+@Composable
+private fun LocationSection(settings: HaSettings) {
+    val context = LocalContext.current
+    var sharing by remember { mutableStateOf(settings.locationSharing) }
+    val permission = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { }
+    Text("Share my location with the assistant", style = MaterialTheme.typography.titleMedium)
+    Text(
+        "Sent along with each request as background, never shown on screen, so \"the closest " +
+            "Target\" or \"weather here\" work where you are. It isn't a request to navigate. " +
+            "Navigation on the phone always searches near you.",
+        style = MaterialTheme.typography.bodySmall,
+    )
+    LocationSharing.entries.forEach { option ->
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier
+                .fillMaxWidth()
+                .selectable(
+                    selected = sharing == option,
+                    onClick = {
+                        sharing = option
+                        settings.locationSharing = option
+                        if (option != LocationSharing.OFF && !PhoneLocation.allowed(context)) {
+                            permission.launch(PhoneLocation.PERMISSIONS)
+                        }
+                    },
+                ),
+        ) {
+            RadioButton(selected = sharing == option, onClick = null)
+            Column(modifier = Modifier.padding(start = 8.dp)) {
+                Text(option.label)
+                Text(option.description, style = MaterialTheme.typography.bodySmall)
             }
         }
     }

@@ -42,6 +42,21 @@ class HaSettings(context: Context) {
             ?: NavigationApp.GOOGLE_MAPS
         set(value) = prefs.edit().putString("navigation_app", value.name).apply()
 
+    /** Names the speech recognizer leans toward, one per line (see [NameCorrections]). */
+    var listenNames: String
+        get() = prefs.getString("listen_names", null).orEmpty()
+        set(value) = prefs.edit().putString("listen_names", value).apply()
+
+    var nameCorrectionsJson: String
+        get() = prefs.getString("name_corrections", null) ?: "[]"
+        set(value) = prefs.edit().putString("name_corrections", value).apply()
+
+    var locationSharing: LocationSharing
+        get() = prefs.getString("location_sharing", null)
+            ?.let { saved -> LocationSharing.entries.firstOrNull { it.name == saved } }
+            ?: LocationSharing.CITY_ZIP
+        set(value) = prefs.edit().putString("location_sharing", value.name).apply()
+
     var noiseReduction: NoiseReduction
         get() = prefs.getString("noise_reduction", null)
             ?.let { saved -> NoiseReduction.entries.firstOrNull { it.name == saved } }

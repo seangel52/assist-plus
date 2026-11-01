@@ -67,7 +67,19 @@ class SpeechEngines private constructor(
                             modelType = "nemo_transducer",
                             tokens = "final/tokens.txt",
                             numThreads = 2,
+                            // Hotwords are plain names, split into the model's pieces with this
+                            // list (tokens.txt, each piece scored the same so fewer pieces win).
+                            // Without both set, sherpa-onnx exits the app on the first hotword.
+                            modelingUnit = "bpe",
+                            bpeVocab = "final/bpe.vocab",
                         ),
+                        // Beam search lets each request lean toward the user's names ("hotwords",
+                        // see NameSteering) for ~10% more time. At 1.0 a sound-alike name wins
+                        // only when the audio is unclear ("Marlin" → Marlon); at 2.5 it made names
+                        // up in noise and in short clips ("Edwards." from half a second of "Hey").
+                        decodingMethod = "modified_beam_search",
+                        maxActivePaths = 4,
+                        hotwordsScore = 1.0f,
                     ),
                 )
                 val speaker = SpeakerEmbeddingExtractor(

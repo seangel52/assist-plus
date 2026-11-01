@@ -60,6 +60,8 @@ class PhoneListener(
     endPauseSeconds: Float = 1.2f,
     /** What's said is private (a spoken PIN): keep the words out of the log. */
     private val keepPrivate: Boolean = false,
+    /** Names to lean toward, one per line (NameSteering.hotwords); empty for none. */
+    private val hotwords: String = "",
 ) {
     private val endSilenceSamples = (endPauseSeconds * RATE).toInt()
     /**
@@ -85,7 +87,8 @@ class PhoneListener(
                     session.step(VoiceProfile.toFloats(pcm))
                     if (session.endReason != null) break
                 }
-                session.finishSpeech()
+                // Cut off by "other voices": only the owner's part of the open phrase is judged.
+                if (session.endReason == "other voices") session.finishOwnerPart() else session.finishSpeech()
             } finally {
                 mic.cancel()
                 session.release()
@@ -124,6 +127,10 @@ class PhoneListener(
         // Where the owner started talking in the current phrase (-1 until heard). With voice ID
         // on, live words only show from here, so a video's words never appear on screen.
         private var ownerFrom = -1
+
+        // When the last 1.5 s last sounded like the owner (-1 until then). A TV that talks on
+        // without a pause keeps the phrase open; this is how the owner's part of it is found.
+        private var lastOwnerAt = -1
         private var lastLiveAt = 0
         private var partial = ""
         private var lastKeptEnd = -1
@@ -143,7 +150,9 @@ class PhoneListener(
             if (speaking && audio.size - lastLiveAt >= LIVE_EVERY_SAMPLES) {
                 lastLiveAt = audio.size
                 val from = liveFrom()
-                val text = if (from >= 0) recognize(audio.copy(from, audio.size)).joinToString(" ") { it.text } else ""
+                // Once the owner stops, another voice talking on doesn't add live words.
+                val to = if (profile != null && lastOwnerAt >= 0) minOf(audio.size, lastOwnerAt + PAD_SAMPLES) else audio.size
+                val text = if (from >= 0) recognize(audio.copy(from, to), steer = false).joinToString(" ") { it.text } else ""
                 if (text != partial) {
                     partial = text
                     onLive(liveText())
@@ -154,6 +163,7 @@ class PhoneListener(
             endReason = when {
                 stop.isCompleted -> "button"
                 lastKeptEnd >= 0 && !speaking && audio.size - lastKeptEnd > endSilenceNeeded() -> "silence"
+                onlyOthersSince() || ownerStoppedMidPhrase() -> "other voices"
                 lastKeptEnd < 0 && !speaking && audio.size > NO_SPEECH_SAMPLES -> "no-speech"
                 audio.size > MAX_SAMPLES -> "max-length"
                 else -> null
@@ -173,16 +183,43 @@ class PhoneListener(
         }
 
         /**
+         * With voice ID, a TV or another person talking right after the owner never leaves the
+         * silence that ends a command. Once the owner has spoken, a newer phrase that still hasn't
+         * sounded like them after the usual pause (plus time for the live check) ends it too.
+         */
+        private fun onlyOthersSince(): Boolean =
+            profile != null && lastKeptEnd >= 0 && phraseStart >= lastKeptEnd && ownerFrom < 0 &&
+                audio.size - lastKeptEnd > endSilenceNeeded() + OTHER_VOICES_EXTRA_SAMPLES
+
+        /**
+         * The owner spoke inside a phrase that another voice (a TV) keeps going without a pause,
+         * and hasn't sounded like themselves for a short pause since: the command is over.
+         */
+        private fun ownerStoppedMidPhrase(): Boolean =
+            profile != null && phraseStart >= 0 && lastOwnerAt >= 0 &&
+                audio.size - lastOwnerAt > endSilenceSamples + OWNER_GONE_EXTRA_SAMPLES
+
+        /** Judges the owner's part of a phrase still open when another voice ended the command. */
+        fun finishOwnerPart() {
+            if (phraseStart < 0 || lastOwnerAt < 0 || profile == null) return
+            val end = minOf(audio.size, lastOwnerAt + PAD_SAMPLES)
+            phrases += judge(profile, audio.copy(phraseStart, end), phraseStart, end)
+            if (phrases.last().accepted) lastKeptEnd = end
+        }
+
+        /**
          * Where live words should start in the current phrase, or -1 to show nothing yet.
-         * With voice ID, that's once the last 1.5 s of audio sounds like the owner.
+         * With voice ID, that's once the last 1.5 s of audio sounds like the owner. The check
+         * keeps running, to notice when the owner stops while another voice goes on.
          */
         private fun liveFrom(): Int {
             val owner = profile ?: return phraseStart
-            if (ownerFrom < 0) {
-                val windowStart = maxOf(phraseStart, audio.size - LIVE_WINDOW_SAMPLES)
-                if (audio.size - windowStart >= LIVE_MIN_SAMPLES) {
-                    val score = VoiceProfile.score(engines, owner, audio.copy(windowStart, audio.size)) ?: 0f
-                    if (score >= threshold - LIVE_SLACK) ownerFrom = windowStart
+            val windowStart = maxOf(phraseStart, audio.size - LIVE_WINDOW_SAMPLES)
+            if (audio.size - windowStart >= LIVE_MIN_SAMPLES) {
+                val score = VoiceProfile.score(engines, owner, audio.copy(windowStart, audio.size)) ?: 0f
+                if (score >= threshold - LIVE_SLACK) {
+                    if (ownerFrom < 0) ownerFrom = windowStart
+                    lastOwnerAt = audio.size
                 }
             }
             return if (ownerFrom < 0) -1 else maxOf(phraseStart, ownerFrom - PAD_SAMPLES / 2)
@@ -242,6 +279,7 @@ class PhoneListener(
             if (phrases.last().accepted) lastKeptEnd = end
             phraseStart = -1
             ownerFrom = -1
+            lastOwnerAt = -1
             partial = ""
             onLive(liveText())
         }
@@ -363,10 +401,11 @@ class PhoneListener(
         private fun text(start: Int, end: Int) = transcribe(start, end).joinToString(" ") { it.text }
 
         /** Words in [samples], with start positions relative to the clip. */
-        private fun recognize(samples: FloatArray): List<Word> {
+        /** [steer]: lean toward the user's names. Off for the live transcript, which re-reads clips too short to steer safely. */
+        private fun recognize(samples: FloatArray, steer: Boolean = true): List<Word> {
             if (samples.isEmpty()) return emptyList()
             val model = engines.recognizer
-            val stream = model.createStream()
+            val stream = if (!steer || hotwords.isEmpty()) model.createStream() else model.createStream(hotwords)
             try {
                 stream.acceptWaveform(samples, RATE)
                 model.decode(stream)
@@ -462,6 +501,12 @@ class PhoneListener(
 
         /** Extra wait when the last words don't sound like a finished sentence. */
         private const val UNFINISHED_EXTRA_SAMPLES = RATE
+
+        /** How much longer than the end pause another voice may run before the command ends. */
+        private const val OTHER_VOICES_EXTRA_SAMPLES = RATE * 3 / 2
+
+        /** The same, when the other voice ran on in the owner's phrase (the voice check lags ~1.5 s already). */
+        private const val OWNER_GONE_EXTRA_SAMPLES = RATE / 2
 
         /** Words people trail off on mid-thought; ending on one means "not done yet". */
         private val TRAILING_WORDS = setOf(

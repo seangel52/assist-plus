@@ -14,7 +14,14 @@ import java.util.Locale
  * the same lookup Maps does), searching near the Home Assistant home first.
  */
 object AddressCheck {
-    data class Address(val houseNumber: String?, val street: String?, val city: String?, val state: String?) {
+    data class Address(
+        val houseNumber: String?,
+        val street: String?,
+        val city: String?,
+        val state: String?,
+        val latitude: Double? = null,
+        val longitude: Double? = null,
+    ) {
         /** What the assistant says: "3140 East Oakland Street, Springfield". */
         val spoken get() = listOfNotNull(streetLine(), city).joinToString(", ")
 
@@ -38,15 +45,25 @@ object AddressCheck {
     /** Only street addresses are checked; "Target on Main Street" is left to the maps app's search. */
     fun needsCheck(place: String) = HOUSE_NUMBER.matches(place)
 
+    /**
+     * [near]: the phone or home. Unless a city was said ("… Street, Springfield"), only places within
+     * [FAR_KM] of it count: a street that doesn't exist here mustn't send the driver to another
+     * state's street of the same name.
+     */
     suspend fun check(context: Context, place: String, near: Pair<Double, Double>?): Result {
         if (!Geocoder.isPresent()) return Result.Unavailable
         val geocoder = Geocoder(context, Locale.getDefault())
+        val anywhere = near == null || namesCity(place)
+        fun search(text: String): List<Address> {
+            val nearby = near?.let { center ->
+                lookUp(geocoder, text, center.first, center.second).filter { anywhere || isNear(it, center) }
+            }.orEmpty()
+            return if (nearby.isEmpty() && anywhere) lookUp(geocoder, text, null, null) else nearby
+        }
         val results = withContext(Dispatchers.IO) {
             withTimeoutOrNull(8_000) {
                 try {
-                    // Near home first, then anywhere.
-                    val nearby = near?.let { (lat, lng) -> lookUp(geocoder, place, lat, lng) }.orEmpty()
-                    nearby.ifEmpty { lookUp(geocoder, place, null, null) }
+                    search(place)
                 } catch (e: IOException) {
                     AppLog.w("Address lookup failed: ${e.message}")
                     null
@@ -61,8 +78,7 @@ object AddressCheck {
         val streetResults = withContext(Dispatchers.IO) {
             withTimeoutOrNull(8_000) {
                 try {
-                    val nearby = near?.let { (lat, lng) -> lookUp(geocoder, street, lat, lng) }.orEmpty()
-                    nearby.ifEmpty { lookUp(geocoder, street, null, null) }
+                    search(street)
                 } catch (e: IOException) {
                     null
                 }
@@ -86,7 +102,34 @@ object AddressCheck {
         } else {
             geocoder.getFromLocationName(place, 5)
         }
-        return found.orEmpty().map { Address(it.subThoroughfare, it.thoroughfare, it.locality, it.adminArea) }
+        return found.orEmpty().map { a ->
+            Address(
+                a.subThoroughfare, a.thoroughfare, a.locality, a.adminArea,
+                latitude = if (a.hasLatitude()) a.latitude else null,
+                longitude = if (a.hasLongitude()) a.longitude else null,
+            )
+        }
+    }
+
+    private fun isNear(address: Address, near: Pair<Double, Double>): Boolean {
+        val lat = address.latitude ?: return false
+        val lng = address.longitude ?: return false
+        return kilometers(lat, lng, near.first, near.second) <= FAR_KM
+    }
+
+    /** True when words follow the street name ("3140 East Oakland Street Springfield") or a comma does. */
+    fun namesCity(place: String): Boolean {
+        val rest = HOUSE_NUMBER.find(place)?.destructured?.component2() ?: place
+        return ',' in rest || streetPart(rest).length < rest.trim().trimEnd('.').length
+    }
+
+    /** Great-circle distance. */
+    internal fun kilometers(lat1: Double, lng1: Double, lat2: Double, lng2: Double): Double {
+        val dLat = Math.toRadians(lat2 - lat1)
+        val dLng = Math.toRadians(lng2 - lng1)
+        val a = Math.sin(dLat / 2).let { it * it } +
+            Math.cos(Math.toRadians(lat1)) * Math.cos(Math.toRadians(lat2)) * Math.sin(dLng / 2).let { it * it }
+        return 6371.0 * 2 * Math.asin(Math.sqrt(a))
     }
 
     /** Picks the best of [results] for what was said ([place] starts with the house number). */
@@ -138,6 +181,7 @@ object AddressCheck {
     private const val SAME_STREET = 0.75f
     private const val SIMILAR_STREET = 0.5f
 
-    // About 75 km around home.
+    // About 75 km around the phone or home.
     private const val NEARBY_DEGREES = 0.7
+    private const val FAR_KM = 150.0
 }

@@ -15,6 +15,10 @@
 
     <!-- Phone actions: setting timers in the clock app, and opening the maps apps. -->
     <uses-permission android:name="com.android.alarm.permission.SET_ALARM" />
+
+    <!-- Optional: nearby address lookups, and the city/ZIP note sent with requests (Settings → Assistant). -->
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <queries>
         <package android:name="com.google.android.apps.maps" />
         <package android:name="com.waze" />
@@ -32,6 +36,7 @@
         <!-- Opened from the app drawer: one-time setup of the HA connection. -->
         <activity
             android:name=".SettingsActivity"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden"
             android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />

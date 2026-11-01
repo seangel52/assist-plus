@@ -111,10 +111,18 @@ class HaClient(baseUrl: String, private val token: String) {
 
     /**
      * Sends a request's text through an Assist pipeline, starting at the intent stage.
-     * With [speak], the pipeline also renders the reply as speech.
+     * With [speak], the pipeline also renders the reply as speech. [onStatus] gets a short
+     * description of each tool the agent uses ("Logging…") while it works.
      */
-    suspend fun runIntent(text: String, conversationId: String?, pipeline: Pipeline?, speak: Boolean): AssistReply =
-        timed(90_000, "the assistant's reply") {
+    suspend fun runIntent(
+        text: String,
+        conversationId: String?,
+        pipeline: Pipeline?,
+        speak: Boolean,
+        onStatus: (String) -> Unit = {},
+    ): AssistReply =
+        // Long enough for a web search or several tools; a stuck request gives up instead of waiting forever.
+        timed(60_000, "the assistant's reply") {
             val command = JSONObject()
                 .put("type", "assist_pipeline/run")
                 .put("start_stage", "intent")
@@ -125,7 +133,7 @@ class HaClient(baseUrl: String, private val token: String) {
 
             val id = sendCommand(command)
             awaitResult(id)
-            awaitPipelineReply(id)
+            awaitPipelineReply(id, onStatus)
         }
 
     /**
@@ -274,7 +282,7 @@ class HaClient(baseUrl: String, private val token: String) {
     }
 
     /** Reads the pipeline events of run [id] until "run-end", collecting the reply. */
-    private suspend fun awaitPipelineReply(id: Int): AssistReply {
+    private suspend fun awaitPipelineReply(id: Int, onStatus: (String) -> Unit): AssistReply {
         var speech: String? = null
         var conversationId: String? = null
         var continueConversation = false
@@ -285,6 +293,13 @@ class HaClient(baseUrl: String, private val token: String) {
             val event = message.getJSONObject("event")
             val data = event.optJSONObject("data")
             when (event.optString("type")) {
+                // Streaming agents report each tool call as it happens.
+                "intent-progress" -> {
+                    val calls = data?.optJSONObject("chat_log_delta")?.optJSONArray("tool_calls")
+                    if (calls != null && calls.length() > 0) {
+                        onStatus(toolStatus(calls.optJSONObject(0)?.optString("tool_name").orEmpty()))
+                    }
+                }
                 "intent-end" -> {
                     val output = data?.optJSONObject("intent_output")
                     speech = output?.optJSONObject("response")
@@ -307,7 +322,12 @@ class HaClient(baseUrl: String, private val token: String) {
         }
     }
 
-    private fun absoluteUrl(url: String): String = if ("://" in url) url else httpBase + url
+    /**
+     * A Home Assistant link through the address this app connects with. HA builds links with
+     * its own address, often the local one, which doesn't work away from home.
+     */
+    private fun absoluteUrl(url: String): String =
+        if ("://" in url) httpBase + "/" + url.substringAfter("://").substringAfter('/', "") else httpBase + url
 
     private suspend fun receive(): JSONObject = try {
         incoming.receive()
@@ -346,3 +366,24 @@ class HaClient(baseUrl: String, private val token: String) {
 
 private fun JSONObject.optStringOrNull(key: String): String? =
     if (isNull(key)) null else optString(key).ifBlank { null }
+
+/**
+ * A short, unspoken status for a tool the agent is using, from its name: Home Health's
+ * log_strength and log_exercise are "Logging…", Basic Memory's write_note is "Saving to
+ * memory…", the Spotify scripts are music, Home Assistant's own Hass* intents are devices.
+ */
+fun toolStatus(tool: String): String {
+    val name = tool.lowercase()
+    return when {
+        name.startsWith("log_") -> "Logging…"
+        "food" in name -> "Looking up the food…"
+        "summary" in name -> "Checking today's totals…"
+        "spotify" in name || "music" in name -> "Working on the music…"
+        "write_note" in name || "edit_note" in name || "save" in name -> "Saving to memory…"
+        "note" in name || "memory" in name || "search" in name || "read" in name -> "Checking memory…"
+        "web" in name -> "Searching the web…"
+        name.startsWith("hass") -> "Controlling the house…"
+        "context" in name || "state" in name -> "Checking the house…"
+        else -> "Working on it…"
+    }
+}
