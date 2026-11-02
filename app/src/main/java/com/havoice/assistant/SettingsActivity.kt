@@ -307,8 +307,8 @@ private fun VoiceIdSection(settings: HaSettings) {
 
     Text("Voice ID", style = MaterialTheme.typography.titleMedium)
     Text(
-        if (enrolled && !VoiceProfile.sampleFile(context).exists()) {
-            "Your voice is set up, but run setup again to turn on voice isolation for when others talk over you."
+        if (enrolled && !VoiceProfile.hasFarVoice(context)) {
+            "Your voice is set up from close up only. Run setup again to add your voice from across the room, so it still knows you at a distance."
         } else if (enrolled) {
             "Your voice is set up. When on, Assist ignores other voices — the TV, videos, the kids."
         } else {

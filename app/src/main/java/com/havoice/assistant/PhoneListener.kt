@@ -264,18 +264,13 @@ class PhoneListener(
         /**
          * The owner's words in the phrase [start, end): those said while the timeline has the
          * owner talking, accepted if that part of the audio as a whole matches the voiceprint.
-         * When it doesn't but sounds partly like the owner (talking over a video), VoxLock may
-         * pull their voice out.
          */
         private fun judge(start: Int, end: Int): Phrase {
             val words = transcribe(start, end)
             val all = words.joinToString(" ") { it.text }
             val owner = profile ?: return Phrase(start, end, null, true, "kept", all)
             val spans = timeline.ownerSpans(start, end)
-            if (spans.isEmpty()) {
-                val mean = timeline.meanScore(start, end)
-                return isolated(owner, start, end, mean) ?: Phrase(start, end, mean, false, "other", all)
-            }
+            if (spans.isEmpty()) return Phrase(start, end, timeline.meanScore(start, end), false, "other", all)
             val ownerAudio = spans.map { audio.copy(it.first, it.last + 1) }.reduce { a, b -> a + b }
             val seconds = ownerAudio.size / RATE.toFloat()
             val snr = meter?.snr(spans.first().first, spans.last().last + 1)
@@ -291,21 +286,7 @@ class PhoneListener(
             if (score != null && score >= needed && kept.isNotEmpty()) {
                 return Phrase(start, end, score, true, "$part ($bar)", kept.joinToString(" ") { it.text })
             }
-            return isolated(owner, start, end, score)
-                ?: Phrase(start, end, score, false, "not you ($bar)", kept.ifEmpty { words }.joinToString(" ") { it.text })
-        }
-
-        /** The owner's words pulled out of a mixed phrase by VoxLock, or null when that isn't possible or doesn't help. */
-        private fun isolated(owner: Voiceprint, start: Int, end: Int, score: Float?): Phrase? {
-            if ((score ?: 0f) < VoiceProfile.MIXED_MIN) return null
-            val started = System.nanoTime()
-            val isolated = VoiceIsolator.isolate(context, audio.copy(start, end)) ?: return null
-            val millis = (System.nanoTime() - started) / 1_000_000
-            val again = VoiceProfile.score(engines, owner, isolated) ?: return null
-            val needed = VoiceProfile.needed(threshold, (end - start) / RATE.toFloat(), meter?.snr(start, end))
-            if (again < needed) return null
-            val how = "isolated %.2f→%.2f in %d ms".format(score ?: 0f, again, millis)
-            return Phrase(start, end, again, true, how, recognize(isolated).joinToString(" ") { it.text })
+            return Phrase(start, end, score, false, "not you ($bar)", kept.ifEmpty { words }.joinToString(" ") { it.text })
         }
 
         /** Words of a phrase, read with a little audio around it; positions are absolute. */

@@ -234,7 +234,6 @@ class AssistActivity : ComponentActivity() {
         lifecycleScope.launch(Dispatchers.Default) {
             NoiseFilter.get(applicationContext, settings.noiseReduction)
             SpeechEngines.get(applicationContext)
-            if (voiceProfile() != null) VoiceIsolator.get(applicationContext)
         }
         // Look up the city while the user speaks; the note is cached for the request.
         lifecycleScope.launch { locationNote() }

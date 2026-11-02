@@ -39,15 +39,13 @@ object VoiceProfile {
     private const val NOISY_SNR_DB = 6f
     private const val NOISE_RELIEF = 0.06f
 
-    /** Phrases scoring at least this, but below the bar, may be the owner mixed with another voice. */
-    const val MIXED_MIN = 0.2f
-
     // "v4": several embeddings (close and far). v3 held one, from close recordings only.
     private fun file(context: Context) = File(context.filesDir, "voiceprint_v4.bin")
     private fun oldFile(context: Context) = File(context.filesDir, "voiceprint_v3.bin")
 
-    /** The owner's speech from setup, as a WAV file — VoxLock's reference voice. */
-    fun sampleFile(context: Context) = File(context.filesDir, "voice_sample_v2.wav")
+    // Setup speech saved for VoxLock voice isolation, which was tried and dropped (it never
+    // rescued a phrase and often lowered the owner's score); deleted where found.
+    private fun oldSample(context: Context) = File(context.filesDir, "voice_sample_v2.wav")
 
     /**
      * The bar a phrase must reach to count as the owner, for [base] (the strictness setting),
@@ -85,7 +83,7 @@ object VoiceProfile {
     fun clear(context: Context) {
         file(context).delete()
         oldFile(context).delete()
-        sampleFile(context).delete()
+        oldSample(context).delete()
     }
 
     /**
@@ -112,7 +110,7 @@ object VoiceProfile {
         file(context).writeBytes(buffer.array())
         oldFile(context).delete()
         HaSettings(context).voiceprintNoise = noise
-        writeWav(sampleFile(context), nearSpeech.reduce { a, b -> a + b })
+        oldSample(context).delete()
 
         val pairs = nearEmbeddings.indices.flatMap { i ->
             (i + 1 until nearEmbeddings.size).map { j -> cosine(nearEmbeddings[i], nearEmbeddings[j]) }
@@ -131,18 +129,6 @@ object VoiceProfile {
 
     private fun average(embeddings: List<FloatArray>) =
         normalize(FloatArray(embeddings[0].size) { i -> embeddings.sumOf { it[i].toDouble() }.toFloat() })
-
-    private fun writeWav(target: File, samples: FloatArray) {
-        val rate = MicRecorder.SAMPLE_RATE
-        val data = samples.size * 2
-        val out = ByteBuffer.allocate(44 + data).order(ByteOrder.LITTLE_ENDIAN)
-        out.put("RIFF".toByteArray()).putInt(36 + data).put("WAVE".toByteArray())
-        out.put("fmt ".toByteArray()).putInt(16).putShort(1).putShort(1).putInt(rate).putInt(rate * 2)
-            .putShort(2).putShort(16)
-        out.put("data".toByteArray()).putInt(data)
-        samples.forEach { out.putShort((it.coerceIn(-1f, 1f) * 32767f).toInt().toShort()) }
-        target.writeBytes(out.array())
-    }
 
     /** Similarity (−1…1) between a phrase and the closest version of the owner's voice. */
     fun score(engines: SpeechEngines, profile: Voiceprint, samples: FloatArray): Float? =
