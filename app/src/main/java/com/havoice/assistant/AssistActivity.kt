@@ -21,6 +21,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.core.content.FileProvider
 import androidx.core.content.IntentCompat
+import com.google.mlkit.common.MlKitException
 import com.google.mlkit.vision.codescanner.GmsBarcodeScanning
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
@@ -315,18 +316,19 @@ class AssistActivity : ComponentActivity() {
             AttachKind.BARCODE -> GmsBarcodeScanning.getClient(this).startScan()
                 .addOnSuccessListener { barcode ->
                     usingOtherScreen = false
-                    backToSheet()
                     barcode.rawValue?.let { value -> prepare { listOf(Attachment.Barcode(Attachments.scanned(value))) } }
                 }
-                .addOnCanceledListener {
-                    usingOtherScreen = false
-                    backToSheet()
-                }
+                .addOnCanceledListener { usingOtherScreen = false }
                 .addOnFailureListener { e ->
                     usingOtherScreen = false
-                    backToSheet()
-                    AppLog.w("Barcode scanner failed: ${e.message}")
-                    messages += AssistMessage("Barcode scanner: ${e.message}", isInput = false, isError = true)
+                    // Backing out of the scanner arrives as a failure ("Failed to scan code").
+                    val code = (e as? MlKitException)?.errorCode
+                    if (code == MlKitException.CANCELLED || code == MlKitException.CODE_SCANNER_CANCELLED) {
+                        AppLog.i("Barcode scanner closed without a scan")
+                    } else {
+                        AppLog.w("Barcode scanner failed ($code): ${e.message}")
+                        messages += AssistMessage("Barcode scanner: ${e.message}", isInput = false, isError = true)
+                    }
                 }
         }
     }
@@ -416,14 +418,6 @@ class AssistActivity : ComponentActivity() {
     }
 
     /**
-     * Google's barcode scanner opens in the app's main task, so closing it shows Settings;
-     * bring the Assist sheet (its own task) back to the front.
-     */
-    private fun backToSheet() {
-        startActivity(Intent(this, AssistActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-    }
-
-    /**
      * Puts [message] in bubble [index], or adds it at the end if that bubble is gone (opening
      * the photo picker while a reply is on its way clears the waiting bubble).
      */
@@ -459,13 +453,6 @@ class AssistActivity : ComponentActivity() {
         const val EXTRA_FROM_WAKE_WORD = "from_wake_word"
         const val EXTRA_WAKE_TOKEN = "wake_token"
         private const val EXTRA_DEBUG_REQUEST = "debug_request"
-
-        // Answers to "Did you mean …?" about an address.
-        private val YES_WORDS = setOf(
-            "yes", "yeah", "yep", "yup", "correct", "right", "sure", "ok", "okay", "that's", "thats", "it",
-            "go", "do", "please", "exactly", "perfect", "that", "one", "the", "is", "sounds", "good",
-        )
-        private val NO_WORDS = setOf("no", "nope", "nah", "wrong", "incorrect", "not", "that", "that's", "thats", "one", "the", "is", "it")
 
         // Asks about an address at most this many times, then lets the maps app search for it.
         private const val MAX_ADDRESS_TRIES = 3
@@ -617,7 +604,7 @@ class AssistActivity : ComponentActivity() {
         continuation.invokeOnCancellation { engine?.shutdown() }
     }
 
-    private fun voiceProfile(): FloatArray? = if (settings.voiceIdEnabled) VoiceProfile.load(this) else null
+    private fun voiceProfile(): Voiceprint? = if (settings.voiceIdEnabled) VoiceProfile.load(this) else null
 
     private fun selectPipeline(pipeline: Pipeline) {
         if (pipeline.id == currentPipeline?.id) return
@@ -768,16 +755,16 @@ class AssistActivity : ComponentActivity() {
 
     /** Handles the answer to [askAboutAddress]; true when there's another question. */
     private suspend fun answerAboutAddress(pending: PendingNavigation, answer: String): Boolean {
-        val words = answer.lowercase().split(Regex("[^a-z']+")).filter { it.isNotEmpty() }
+        val kind = ConfirmAnswer.classify(answer)
         val suggestion = pending.suggestion
         return when {
-            suggestion != null && words.isNotEmpty() && words.all { it in YES_WORDS } ->
+            suggestion != null && kind == ConfirmAnswer.Kind.YES ->
                 runPhoneAction(
                     pending.action.copy(place = suggestion.query),
                     answer,
                     confirmed = "Navigating to ${suggestion.spoken}.",
                 )
-            words.isNotEmpty() && words.all { it in NO_WORDS } ->
+            kind != ConfirmAnswer.Kind.OTHER ->
                 askAboutAddress(pending.copy(suggestion = null, attempt = pending.attempt + 1), "Okay. What's the address?")
             else -> {
                 // A whole new address ("take me to…" or just the address), or the missing city.
@@ -822,7 +809,7 @@ class AssistActivity : ComponentActivity() {
     private fun listenAfter(run: Job?) {
         lifecycleScope.launch {
             run?.join()
-            startListening(followUp = true)
+            startListening()
         }
     }
 
@@ -877,8 +864,7 @@ class AssistActivity : ComponentActivity() {
         if (granted) startListening() else micPermission.launch(Manifest.permission.RECORD_AUDIO)
     }
 
-    /** [followUp]: listening for the answer to a question Assist just asked. */
-    private fun startListening(followUp: Boolean = false) {
+    private fun startListening() {
         val pipeline = currentPipeline ?: return
         if (voiceJob?.isActive == true) return
         player.stop()
@@ -908,17 +894,18 @@ class AssistActivity : ComponentActivity() {
                 val threshold = settings.voiceIdThreshold
                 // A spoken PIN is never shown, logged or saved.
                 val forPin = awaitingPin
+                val meter = SignalMeter()
                 val listener = PhoneListener(
                     applicationContext,
                     voiceProfile(),
                     threshold,
-                    expectingAnswer = followUp,
                     endPauseSeconds = settings.endPauseSeconds,
                     keepPrivate = forPin,
                     hotwords = NameSteering.hotwords(applicationContext, NameCorrections.names(settings)),
+                    meter = meter,
                 )
                 val capture = if (settings.saveRecordings && !forPin) Captures.Recorder() else null
-                val result = listener.listen(MicRecorder.frames(applicationContext, noise, capture), stop) { live ->
+                val result = listener.listen(MicRecorder.frames(applicationContext, noise, capture, meter), stop) { live ->
                     runOnUiThread {
                         val shown = if (forPin && live.isNotEmpty()) "••••" else live
                         if (showLive) setMessage(inputIndex, AssistMessage(shown, isInput = true, isPlaceholder = live.isEmpty()))
@@ -929,7 +916,7 @@ class AssistActivity : ComponentActivity() {
                 capture?.let { Captures.save(applicationContext, "assist", it, "noise $noise | ${result.details}") }
                 val command = result.command
                 if (command == null) {
-                    val notice = if (forPin) "Didn't catch that. Say your PIN again." else notHeardMessage(result, threshold)
+                    val notice = if (forPin) "Didn't catch that. Say your PIN again." else notHeardMessage(result)
                     setMessage(inputIndex, AssistMessage(notice, isInput = false, isError = true))
                     return@launch
                 }
@@ -945,7 +932,7 @@ class AssistActivity : ComponentActivity() {
                     }
                     return@launch
                 }
-                val text = WordFixes.apply(command.text, settings.wordFixes)
+                val text = command.text
                 heard = text
                 val exit = if (command.soundsLikeStop) ExitWords.Kind.CANCEL else ExitWords.classify(text, WakeWords.load(settings))
                 if (exit == ExitWords.Kind.CANCEL) {
@@ -1022,7 +1009,7 @@ class AssistActivity : ComponentActivity() {
                     startIdleWake()
                 }
             }
-            if (listenAgain) startListening(followUp = true)
+            if (listenAgain) startListening()
         }
     }
 
@@ -1073,14 +1060,14 @@ class AssistActivity : ComponentActivity() {
     }
 
     /** Explains an empty result: nothing said, or speech that voice ID didn't think was you. */
-    private fun notHeardMessage(result: ListenResult, threshold: Float): String {
+    private fun notHeardMessage(result: ListenResult): String {
         val dropped = result.segments.filter { !it.accepted }
         if (dropped.isEmpty()) return "Sorry, I didn't catch that."
         val list = dropped.joinToString(", ") { s ->
             val words = s.preview.ifBlank { "…" }
             s.score?.let { "\"$words\" (%.2f)".format(it) } ?: "\"$words\""
         }
-        return "Didn't recognize your voice (needs %.2f). Ignored: %s".format(threshold, list)
+        return "Didn't recognize your voice. Ignored: $list"
     }
 
     /** Abandons any listening or speaking in progress. */

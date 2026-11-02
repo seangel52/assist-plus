@@ -9,7 +9,8 @@ class HaSettings(context: Context) {
     init {
         // Spotify used to be handled in the app (its own sign-in and search keys); it now goes
         // through Home Assistant, so remove what an older version may have saved.
-        val leftovers = prefs.all.keys.filter { it.startsWith("spotify_") }
+        // Word fixes (find-and-replace on what was heard) gave way to the dictionary's names.
+        val leftovers = prefs.all.keys.filter { it.startsWith("spotify_") || it == "word_fixes" }
         if (leftovers.isNotEmpty()) prefs.edit().apply { leftovers.forEach { remove(it) } }.apply()
     }
 
@@ -74,6 +75,16 @@ class HaSettings(context: Context) {
         get() = prefs.getFloat("voice_id_threshold_v3", VoiceProfile.DEFAULT_THRESHOLD)
         set(value) = prefs.edit().putFloat("voice_id_threshold_v3", value).apply()
 
+    /**
+     * The noise reduction the voice setup recordings went through. Voiceprints from before this
+     * was saved were made with the noise reduction chosen at the time, most likely today's.
+     */
+    var voiceprintNoise: NoiseReduction
+        get() = prefs.getString("voiceprint_noise", null)
+            ?.let { saved -> NoiseReduction.entries.firstOrNull { it.name == saved } }
+            ?: noiseReduction
+        set(value) = prefs.edit().putString("voiceprint_noise", value.name).apply()
+
     /** Keep recordings of listening sessions and voice tests on the phone for tuning. */
     var saveRecordings: Boolean
         get() = prefs.getBoolean("save_recordings", false)
@@ -83,11 +94,6 @@ class HaSettings(context: Context) {
     var endPauseSeconds: Float
         get() = prefs.getFloat("end_pause_seconds", 1.2f)
         set(value) = prefs.edit().putFloat("end_pause_seconds", value).apply()
-
-    /** Lines of "heard => meant" corrections applied to what was heard before it's sent. */
-    var wordFixes: String
-        get() = prefs.getString("word_fixes", null).orEmpty()
-        set(value) = prefs.edit().putString("word_fixes", value).apply()
 
     /** The AI Task entity that describes attached photos; found automatically when blank. */
     var aiTaskEntity: String

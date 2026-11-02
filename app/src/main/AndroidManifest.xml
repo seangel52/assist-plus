@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
@@ -53,7 +54,7 @@
             android:exported="true"
             android:launchMode="singleTask"
             android:showWhenLocked="true"
-            android:taskAffinity=""
+            android:taskAffinity="com.havoice.assistant.sheet"
             android:theme="@style/Theme.HaVoice.Overlay"
             android:windowSoftInputMode="adjustResize">
             <intent-filter>
@@ -69,6 +70,14 @@
                 <data android:mimeType="text/plain" />
             </intent-filter>
         </activity>
+
+        <!-- Google's barcode scanner opens as a new task; in the sheet's task it stacks on top of
+             the sheet and closing it returns there (not to Settings, the app's main task). -->
+        <activity
+            android:name="com.google.mlkit.vision.codescanner.internal.GmsBarcodeScanningDelegateActivity"
+            android:taskAffinity="com.havoice.assistant.sheet"
+            android:excludeFromRecents="true"
+            tools:node="merge" />
 
         <service
             android:name=".WakeWordService"

@@ -27,7 +27,13 @@ object MicRecorder {
      * kept for tuning.
      */
     @SuppressLint("MissingPermission")
-    fun frames(context: Context, noise: NoiseReduction, capture: Captures.Recorder? = null): Flow<ByteArray> = flow {
+    fun frames(
+        context: Context,
+        noise: NoiseReduction,
+        capture: Captures.Recorder? = null,
+        /** Gets the raw audio's loudness (before noise reduction). */
+        meter: SignalMeter? = null,
+    ): Flow<ByteArray> = flow {
         val filter = NoiseFilter.get(context, noise)?.also { it.reset() }
         val minBuffer = AudioRecord.getMinBufferSize(
             SAMPLE_RATE,
@@ -64,6 +70,7 @@ object MicRecorder {
                 val read = record.read(buffer, 0, buffer.size)
                 if (read <= 0) continue
                 val chunk = buffer.copyOf(read)
+                meter?.add(chunk)
                 val out = filter?.process(chunk) ?: chunk
                 capture?.let {
                     it.raw.write(chunk)

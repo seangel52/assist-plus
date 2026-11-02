@@ -174,7 +174,22 @@ object AddressCheck {
     /** 1 for the same text, falling toward 0 as more letters differ. */
     private fun similarity(a: String, b: String): Float {
         if (a.isEmpty() || b.isEmpty()) return 0f
-        return 1f - ExitWords.editDistance(a, b).toFloat() / maxOf(a.length, b.length)
+        return 1f - editDistance(a, b).toFloat() / maxOf(a.length, b.length)
+    }
+
+    /** Letters to add, remove or change to turn [a] into [b]. */
+    private fun editDistance(a: String, b: String): Int {
+        var previous = IntArray(b.length + 1) { it }
+        for (i in 1..a.length) {
+            val current = IntArray(b.length + 1)
+            current[0] = i
+            for (j in 1..b.length) {
+                val cost = if (a[i - 1] == b[j - 1]) 0 else 1
+                current[j] = minOf(previous[j] + 1, current[j - 1] + 1, previous[j - 1] + cost)
+            }
+            previous = current
+        }
+        return previous[b.length]
     }
 
     // A misheard street ("Eastoak Lind" for "East Oakland") still scores about 0.9; a different street is far lower.
@@ -184,4 +199,44 @@ object AddressCheck {
     // About 75 km around the phone or home.
     private const val NEARBY_DEGREES = 0.7
     private const val FAR_KM = 150.0
+}
+
+/**
+ * The answer to "Did you mean …?": a yes or a no, said any of the usual ways, or anything else
+ * (a corrected address, the missing city), which is used as new information. A yes or no
+ * followed by more than courtesy ("no, it's on Elm") counts as new information.
+ */
+object ConfirmAnswer {
+    enum class Kind { YES, NO, OTHER }
+
+    private val LEAD = setOf("um", "uh", "oh", "well", "hey", "hmm")
+    private val YES_STARTS = listOf(
+        "yes", "yeah", "yep", "yup", "correct", "right", "sure", "ok", "okay", "exactly", "perfect", "absolutely",
+        "that's right", "thats right", "that's it", "thats it", "that's the one", "thats the one", "that one",
+        "sounds good", "go ahead", "do it", "you got it",
+    ).map { it.split(' ') }.sortedByDescending { it.size }
+    private val NO_STARTS = listOf(
+        "no", "nope", "nah", "wrong", "incorrect", "not that", "not it", "that's not it", "thats not it",
+        "that's wrong", "thats wrong", "not that one",
+    ).map { it.split(' ') }.sortedByDescending { it.size }
+
+    // What may follow a yes or no without adding anything: "yes please", "no thank you", "yeah that's it".
+    private val COURTESY = setOf(
+        "please", "thanks", "thank", "you", "it", "is", "that", "that's", "thats", "one", "the", "go", "ahead",
+        "do", "right", "correct", "exactly", "sir", "yes", "yeah", "no", "nope",
+    )
+
+    fun classify(answer: String): Kind {
+        val words = answer.lowercase().split(Regex("[^a-z0-9']+")).filter { it.isNotEmpty() }.dropWhile { it in LEAD }
+        fun startsWith(phrases: List<List<String>>) = phrases.firstOrNull { words.take(it.size) == it }
+        val yes = startsWith(YES_STARTS)
+        val no = startsWith(NO_STARTS)
+        // "No" phrases are checked first where both could match ("that's not it" vs "that's it").
+        val (kind, start) = when {
+            no != null -> Kind.NO to no
+            yes != null -> Kind.YES to yes
+            else -> return Kind.OTHER
+        }
+        return if (words.drop(start.size).all { it in COURTESY }) kind else Kind.OTHER
+    }
 }

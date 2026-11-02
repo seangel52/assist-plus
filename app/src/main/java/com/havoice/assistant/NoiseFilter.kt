@@ -24,18 +24,30 @@ class NoiseFilter private constructor(private val denoiser: OnlineSpeechDenoiser
     /** How much audio the model needs before it can output a step — its added delay. */
     val stepMillis: Int get() = denoiser.frameShiftInSamples * 1000 / denoiser.sampleRate
 
-    fun process(pcm: ByteArray): ByteArray = toPcm(denoiser.run(toFloats(pcm), MicRecorder.SAMPLE_RATE).samples)
+    fun process(pcm: ByteArray): ByteArray = toPcm(process(toFloats(pcm)))
 
-    fun flush(): ByteArray = toPcm(denoiser.flush().samples)
+    fun process(samples: FloatArray): FloatArray = denoiser.run(samples, MicRecorder.SAMPLE_RATE).samples
+
+    fun flush(): ByteArray = toPcm(flushSamples())
+
+    fun flushSamples(): FloatArray = denoiser.flush().samples
 
     fun reset() = denoiser.reset()
 
     companion object {
-        private val loaded = mutableMapOf<NoiseReduction, NoiseFilter>()
+        private val loaded = mutableMapOf<Pair<NoiseReduction, Boolean>, NoiseFilter>()
 
         /** The filter for [mode], loading its model on first use; null when [mode] isn't model-based. */
+        fun get(context: Context, mode: NoiseReduction): NoiseFilter? = load(context, mode, offline = false)
+
+        /**
+         * A second filter for [mode], for cleaning whole clips (a wake phrase to check) while the
+         * live one may be in use. Callers synchronize on it.
+         */
+        fun offline(context: Context, mode: NoiseReduction): NoiseFilter? = load(context, mode, offline = true)
+
         @Synchronized
-        fun get(context: Context, mode: NoiseReduction): NoiseFilter? {
+        private fun load(context: Context, mode: NoiseReduction, offline: Boolean): NoiseFilter? {
             val model = when (mode) {
                 NoiseReduction.LIGHT -> OfflineSpeechDenoiserModelConfig(
                     gtcrn = OfflineSpeechDenoiserGtcrnModelConfig(model = "denoise/gtcrn_simple.onnx"),
@@ -45,7 +57,7 @@ class NoiseFilter private constructor(private val denoiser: OnlineSpeechDenoiser
                 )
                 else -> return null
             }
-            loaded[mode]?.let { return it }
+            loaded[mode to offline]?.let { return it }
             return try {
                 val started = System.nanoTime()
                 val denoiser = OnlineSpeechDenoiser(
@@ -56,7 +68,7 @@ class NoiseFilter private constructor(private val denoiser: OnlineSpeechDenoiser
                     "Noise model $mode loaded in ${(System.nanoTime() - started) / 1_000_000} ms " +
                         "(${denoiser.sampleRate} Hz, step ${denoiser.frameShiftInSamples} samples)",
                 )
-                NoiseFilter(denoiser).also { loaded[mode] = it }
+                NoiseFilter(denoiser).also { loaded[mode to offline] = it }
             } catch (e: Exception) {
                 // Fall back to the unfiltered mic rather than failing to listen at all.
                 AppLog.e("Couldn't load noise model $mode", e)

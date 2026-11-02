@@ -40,10 +40,10 @@ class SoundGate(private val preRollChunks: Int = 2, private val hangoverChunks: 
     }
 
     private companion object {
-        // About 8 dB above the background.
-        const val LOUDER = 2.5f
-        // About -50 dBFS: below this it's silence, however quiet the room.
-        const val MIN_LEVEL = 0.003f
+        // About 4 dB above the background: a voice from across the room stands out only a little.
+        const val LOUDER = 1.6f
+        // About -60 dBFS: below this it's silence, however quiet the room.
+        const val MIN_LEVEL = 0.001f
         const val FLOOR_RISE = 0.02f
     }
 }

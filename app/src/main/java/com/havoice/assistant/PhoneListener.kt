@@ -18,7 +18,7 @@ data class HeardSegment(
     /** Similarity to the owner's voiceprint, or null when voice ID is off. */
     val score: Float?,
     val accepted: Boolean,
-    /** How voice ID decided: kept, you, split, isolated, mix or other. */
+    /** How voice ID decided, for the log. */
     val how: String,
     /** The owner's words kept from this phrase, or what was heard if it was dropped. */
     val preview: String,
@@ -26,7 +26,7 @@ data class HeardSegment(
 
 data class HeardCommand(
     val text: String,
-    /** Why listening stopped: silence, button, no-speech, max-length or mic-ended. */
+    /** Why listening stopped: silence, other voices, button, no-speech, max-length or mic-ended. */
     val endReason: String,
     /** A short request whose audio sounded like "cancel" / "stop" / "never mind", whatever the text says. */
     val soundsLikeStop: Boolean = false,
@@ -41,29 +41,32 @@ data class ListenResult(
 )
 
 /**
- * Does all the listening on the phone: finds phrases, shows their words live, keeps
- * only phrases in the owner's voice (when a voiceprint is given), decides when the
- * command is finished, and produces the text sent to Home Assistant.
+ * Does all the listening on the phone: finds phrases, shows their words live, keeps only the
+ * owner's speech (when a voiceprint is given), decides when the command is finished, and
+ * produces the text sent to Home Assistant.
  *
- * Each phrase is transcribed whole, with a little audio around it, which gives the best
- * accuracy. When another voice runs straight into the owner's without a pause, the phrase
- * is split in its text: at the sentence break nearest to where the voice changes.
+ * With voice ID, who is talking is tracked continuously ([SpeakerTimeline]), not decided once
+ * per phrase: a TV that talks straight into or over the owner shares phrases with them. Each
+ * phrase is transcribed whole (the most accurate), its words are kept by when they were said,
+ * and the owner's part is then checked as a whole against the voiceprint. The command ends
+ * when the owner has been quiet for the end pause, whether the room went quiet or not.
  */
 class PhoneListener(
     private val context: Context,
-    private val profile: FloatArray?,
+    private val profile: Voiceprint?,
     /** Voice ID strictness from settings. */
     private val threshold: Float,
-    /** Assist just asked a question, so a one- or two-word answer ("No", "Yes please") is likely. */
-    private val expectingAnswer: Boolean = false,
     /** Silence after a finished-sounding sentence before the command counts as done. */
     endPauseSeconds: Float = 1.2f,
     /** What's said is private (a spoken PIN): keep the words out of the log. */
     private val keepPrivate: Boolean = false,
     /** Names to lean toward, one per line (NameSteering.hotwords); empty for none. */
     private val hotwords: String = "",
+    /** The raw mic's loudness, to allow for a distant voice or loud background. */
+    private val meter: SignalMeter? = null,
 ) {
     private val endSilenceSamples = (endPauseSeconds * RATE).toInt()
+
     /**
      * Listens until the command ends. [onLive] gets the running transcript (called off the
      * main thread).
@@ -87,8 +90,7 @@ class PhoneListener(
                     session.step(VoiceProfile.toFloats(pcm))
                     if (session.endReason != null) break
                 }
-                // Cut off by "other voices": only the owner's part of the open phrase is judged.
-                if (session.endReason == "other voices") session.finishOwnerPart() else session.finishSpeech()
+                session.finishSpeech()
             } finally {
                 mic.cancel()
                 session.release()
@@ -97,9 +99,7 @@ class PhoneListener(
         }
     }
 
-    private class Word(val text: String, val start: Int) {
-        val endsSentence get() = text.lastOrNull()?.let { it == '.' || it == '?' || it == '!' } == true
-    }
+    private class Word(val text: String, val start: Int, val mid: Int)
 
     private class Phrase(
         val start: Int,
@@ -110,9 +110,6 @@ class PhoneListener(
         val text: String,
     )
 
-    /** A speaker change found inside a phrase: [cut] is relative to the phrase start. */
-    private class Split(val cut: Int, val keepRight: Boolean, val mine: Float, val other: Float, val millis: Long)
-
     private inner class Session(
         private val engines: SpeechEngines,
         private val stop: Deferred<Unit>,
@@ -121,19 +118,15 @@ class PhoneListener(
         private val vad = engines.vad.also { it.reset() }
         private val vadFeeder = VadFeeder(vad)
         private val audio = AudioBuffer()
+        private val timeline = SpeakerTimeline(HOP_SAMPLES)
 
         private var phraseStart = -1
-
-        // Where the owner started talking in the current phrase (-1 until heard). With voice ID
-        // on, live words only show from here, so a video's words never appear on screen.
-        private var ownerFrom = -1
-
-        // When the last 1.5 s last sounded like the owner (-1 until then). A TV that talks on
-        // without a pause keeps the phrase open; this is how the owner's part of it is found.
-        private var lastOwnerAt = -1
+        private var lastWindowAt = 0
         private var lastLiveAt = 0
         private var partial = ""
-        private var lastKeptEnd = -1
+
+        // End of the last phrase the speech detector found (how the end is found without voice ID).
+        private var lastSpeechEnd = -1
         private val phrases = mutableListOf<Phrase>()
         var endReason: String? = null
             private set
@@ -145,29 +138,47 @@ class PhoneListener(
             if (speaking && phraseStart < 0) {
                 // The detector notices speech a moment late; start a little earlier.
                 phraseStart = maxOf(0, audio.size - PAD_SAMPLES)
+                lastWindowAt = audio.size
                 lastLiveAt = 0
+            }
+            if (phraseStart >= 0 && audio.size - lastWindowAt >= HOP_SAMPLES) {
+                lastWindowAt = audio.size
+                scoreWindow(maxOf(phraseStart, audio.size - WINDOW_SAMPLES), audio.size)
             }
             if (speaking && audio.size - lastLiveAt >= LIVE_EVERY_SAMPLES) {
                 lastLiveAt = audio.size
-                val from = liveFrom()
-                // Once the owner stops, another voice talking on doesn't add live words.
-                val to = if (profile != null && lastOwnerAt >= 0) minOf(audio.size, lastOwnerAt + PAD_SAMPLES) else audio.size
-                val text = if (from >= 0) recognize(audio.copy(from, to), steer = false).joinToString(" ") { it.text } else ""
+                val text = liveWords()
                 if (text != partial) {
                     partial = text
                     onLive(liveText())
                 }
             }
             popSegments()
+            endReason = endReason(speaking)
+        }
 
-            endReason = when {
-                stop.isCompleted -> "button"
-                lastKeptEnd >= 0 && !speaking && audio.size - lastKeptEnd > endSilenceNeeded() -> "silence"
-                onlyOthersSince() || ownerStoppedMidPhrase() -> "other voices"
-                lastKeptEnd < 0 && !speaking && audio.size > NO_SPEECH_SAMPLES -> "no-speech"
+        private fun endReason(speaking: Boolean): String? {
+            if (stop.isCompleted) return "button"
+            val lastHeard = if (profile != null) timeline.lastOwnerEnd() else lastSpeechEnd
+            // A phrase that just started hasn't had its voice checked yet: it may be the owner.
+            val unjudged = speaking && phraseStart >= 0 && audio.size - phraseStart < FIRST_VERDICT_SAMPLES
+            val quietFor = audio.size - lastHeard
+            return when {
+                lastHeard >= 0 && !unjudged && (profile != null || !speaking) && quietFor > endSilenceNeeded() ->
+                    if (speaking) "other voices" else "silence"
+                lastHeard < 0 && audio.size > NO_SPEECH_SAMPLES -> "no-speech"
                 audio.size > MAX_SAMPLES -> "max-length"
                 else -> null
             }
+        }
+
+        /** Scores audio [from, to) against the voiceprint and adds it to the timeline. */
+        private fun scoreWindow(from: Int, to: Int) {
+            val owner = profile ?: return
+            if (to - from < MIN_WINDOW_SAMPLES) return
+            val score = VoiceProfile.score(engines, owner, audio.copy(from, to)) ?: return
+            val needed = VoiceProfile.needed(threshold - WINDOW_SLACK, (to - from) / RATE.toFloat(), meter?.snr(from, to))
+            timeline.add(from, to, score, needed)
         }
 
         /**
@@ -176,56 +187,26 @@ class PhoneListener(
          * probably taking a breath or remembering something.
          */
         private fun endSilenceNeeded(): Int {
-            val last = phrases.lastOrNull { it.accepted }?.text?.trim().orEmpty()
+            val last = liveText().trim()
             val lastWord = last.substringAfterLast(' ').trimEnd(',', '.', '?', '!').lowercase()
             val finished = last.endsWith(".") || last.endsWith("?") || last.endsWith("!")
             return if (finished && lastWord !in TRAILING_WORDS) endSilenceSamples else endSilenceSamples + UNFINISHED_EXTRA_SAMPLES
         }
 
         /**
-         * With voice ID, a TV or another person talking right after the owner never leaves the
-         * silence that ends a command. Once the owner has spoken, a newer phrase that still hasn't
-         * sounded like them after the usual pause (plus time for the live check) ends it too.
+         * The live words of the phrase in progress. With voice ID, only from where the owner has
+         * been heard, so a video's words never appear on screen.
          */
-        private fun onlyOthersSince(): Boolean =
-            profile != null && lastKeptEnd >= 0 && phraseStart >= lastKeptEnd && ownerFrom < 0 &&
-                audio.size - lastKeptEnd > endSilenceNeeded() + OTHER_VOICES_EXTRA_SAMPLES
-
-        /**
-         * The owner spoke inside a phrase that another voice (a TV) keeps going without a pause,
-         * and hasn't sounded like themselves for a short pause since: the command is over.
-         */
-        private fun ownerStoppedMidPhrase(): Boolean =
-            profile != null && phraseStart >= 0 && lastOwnerAt >= 0 &&
-                audio.size - lastOwnerAt > endSilenceSamples + OWNER_GONE_EXTRA_SAMPLES
-
-        /** Judges the owner's part of a phrase still open when another voice ended the command. */
-        fun finishOwnerPart() {
-            if (phraseStart < 0 || lastOwnerAt < 0 || profile == null) return
-            val end = minOf(audio.size, lastOwnerAt + PAD_SAMPLES)
-            phrases += judge(profile, audio.copy(phraseStart, end), phraseStart, end)
-            if (phrases.last().accepted) lastKeptEnd = end
+        private fun liveWords(): String {
+            if (phraseStart < 0) return ""
+            if (profile == null) return recognize(audio.copy(phraseStart, audio.size), steer = false).joinToString(" ") { it.text }
+            val spans = timeline.ownerSpans(phraseStart, audio.size).ifEmpty { return "" }
+            val from = maxOf(phraseStart, spans.first().first - PAD_SAMPLES / 2)
+            val to = minOf(audio.size, spans.last().last + 1 + PAD_SAMPLES)
+            return recognize(audio.copy(from, to), steer = false).joinToString(" ") { it.text }
         }
 
-        /**
-         * Where live words should start in the current phrase, or -1 to show nothing yet.
-         * With voice ID, that's once the last 1.5 s of audio sounds like the owner. The check
-         * keeps running, to notice when the owner stops while another voice goes on.
-         */
-        private fun liveFrom(): Int {
-            val owner = profile ?: return phraseStart
-            val windowStart = maxOf(phraseStart, audio.size - LIVE_WINDOW_SAMPLES)
-            if (audio.size - windowStart >= LIVE_MIN_SAMPLES) {
-                val score = VoiceProfile.score(engines, owner, audio.copy(windowStart, audio.size)) ?: 0f
-                if (score >= threshold - LIVE_SLACK) {
-                    if (ownerFrom < 0) ownerFrom = windowStart
-                    lastOwnerAt = audio.size
-                }
-            }
-            return if (ownerFrom < 0) -1 else maxOf(phraseStart, ownerFrom - PAD_SAMPLES / 2)
-        }
-
-        /** Treats any phrase still in progress as finished (e.g. the mic button was tapped mid-word). */
+        /** Treats any phrase still in progress as finished (the command ended mid-phrase). */
         fun finishSpeech() {
             vad.flush()
             popSegments()
@@ -270,138 +251,81 @@ class PhoneListener(
 
         private fun handleSegment(segment: SpeechSegment) {
             val start = segment.start.toInt()
-            val end = start + segment.samples.size
-            phrases += if (profile == null) {
-                Phrase(start, end, null, true, "kept", transcribe(start, end).joinToString(" ") { it.text })
-            } else {
-                judge(profile, segment.samples, start, end)
-            }
-            if (phrases.last().accepted) lastKeptEnd = end
+            val end = minOf(audio.size, start + segment.samples.size)
+            // Score the end of the phrase too, and a phrase too short to have been scored yet.
+            if (end - lastWindowAt > HOP_SAMPLES / 2 || phraseStart < 0) scoreWindow(maxOf(start, end - WINDOW_SAMPLES), end)
+            phrases += judge(start, end)
+            lastSpeechEnd = end
             phraseStart = -1
-            ownerFrom = -1
-            lastOwnerAt = -1
             partial = ""
             onLive(liveText())
         }
 
         /**
-         * Decides whether a phrase is the owner's. A middling score on a longer phrase usually
-         * means another voice ran into the owner's without a pause: then the voice change is
-         * located and the text is cut at the nearest sentence break. A phrase that sounds
-         * partly like the owner (talking over a video) gets their voice pulled out by VoxLock.
+         * The owner's words in the phrase [start, end): those said while the timeline has the
+         * owner talking, accepted if that part of the audio as a whole matches the voiceprint.
+         * When it doesn't but sounds partly like the owner (talking over a video), VoxLock may
+         * pull their voice out.
          */
-        private fun judge(profile: FloatArray, samples: FloatArray, start: Int, end: Int): Phrase {
-            val seconds = samples.size / RATE.toFloat()
-            val needed = VoiceProfile.thresholdFor(seconds, threshold)
-            val whole = VoiceProfile.score(engines, profile, samples)
-                ?: return Phrase(start, end, null, false, "too short", "")
-            if (whole >= CLEARLY_YOU) return Phrase(start, end, whole, true, "you", text(start, end))
-
-            if (samples.size >= 2 * SPLIT_MIN_PART) {
-                val split = bestSplit(profile, samples)
-                if (split != null) {
-                    val words = transcribe(start, end)
-                    val at = splitWords(words, start + split.cut)
-                    if (at != null) {
-                        val kept = if (split.keepRight) words.drop(at) else words.take(at)
-                        val how = "split at sentence break %.2fs, you %.2f / other %.2f in %d ms"
-                            .format(split.cut / RATE.toFloat(), split.mine, split.other, split.millis)
-                        return Phrase(start, end, split.mine, kept.isNotEmpty(), how, kept.joinToString(" ") { it.text })
-                    }
-                }
-            }
-            if (whole >= needed) return Phrase(start, end, whole, true, "you", text(start, end))
-
-            if (whole >= VoiceProfile.MIXED_MIN) {
-                val started = System.nanoTime()
-                val isolated = VoiceIsolator.isolate(context, samples)
-                val millis = (System.nanoTime() - started) / 1_000_000
-                if (isolated != null) {
-                    val again = VoiceProfile.score(engines, profile, isolated)
-                    if (again != null && again >= needed) {
-                        val how = "isolated %.2f→%.2f in %d ms".format(whole, again, millis)
-                        return Phrase(start, end, again, true, how, recognize(isolated).joinToString(" ") { it.text })
-                    }
-                    val how = "mix, isolated only %.2f in %d ms".format(again ?: 0f, millis)
-                    return shortAnswer(start, end) ?: Phrase(start, end, whole, false, how, text(start, end))
-                }
-            }
-            return shortAnswer(start, end) ?: Phrase(start, end, whole, false, "other", text(start, end))
-        }
-
-        /**
-         * A one- or two-word answer tacked onto another voice ("…sitting in bed? No") is too
-         * short for voice ID. When Assist just asked a question, keep such a piece if it is
-         * clearly louder than the rest of the phrase: the owner is near the phone, the TV isn't.
-         */
-        private fun shortAnswer(start: Int, end: Int): Phrase? {
-            if (!expectingAnswer) return null
+        private fun judge(start: Int, end: Int): Phrase {
             val words = transcribe(start, end)
-            val from = maxOf(0, start - PAD_SAMPLES)
-            val to = minOf(audio.size, end + PAD_SAMPLES)
-            for (i in 1 until words.size) {
-                if (!words[i - 1].endsSentence) continue
-                val cut = words[i].start
-                for (keepRight in listOf(true, false)) {
-                    val piece = if (keepRight) words.drop(i) else words.take(i)
-                    val (pieceFrom, pieceTo) = if (keepRight) cut to to else from to cut
-                    if (piece.size > 2 || pieceTo - pieceFrom > SHORT_ANSWER_MAX_SAMPLES) continue
-                    val louder = loudness(pieceFrom, pieceTo) - if (keepRight) loudness(from, cut) else loudness(cut, to)
-                    if (louder >= SHORT_ANSWER_LOUDER_DB) {
-                        val how = "short answer, %.1f dB louder than the rest".format(louder)
-                        return Phrase(start, end, null, true, how, piece.joinToString(" ") { it.text })
-                    }
-                }
+            val all = words.joinToString(" ") { it.text }
+            val owner = profile ?: return Phrase(start, end, null, true, "kept", all)
+            val spans = timeline.ownerSpans(start, end)
+            if (spans.isEmpty()) {
+                val mean = timeline.meanScore(start, end)
+                return isolated(owner, start, end, mean) ?: Phrase(start, end, mean, false, "other", all)
             }
-            return null
+            val ownerAudio = spans.map { audio.copy(it.first, it.last + 1) }.reduce { a, b -> a + b }
+            val seconds = ownerAudio.size / RATE.toFloat()
+            val snr = meter?.snr(spans.first().first, spans.last().last + 1)
+            val needed = VoiceProfile.needed(threshold, seconds, snr)
+            val score = VoiceProfile.score(engines, owner, ownerAudio)
+            val kept = words.filter { w -> spans.any { w.mid in it } }
+            val part = if (seconds * RATE >= (end - start) * WHOLE_PHRASE) {
+                "you"
+            } else {
+                "you %.1f–%.1fs".format((spans.first().first - start) / RATE.toFloat(), (spans.last().last + 1 - start) / RATE.toFloat())
+            }
+            val bar = "bar %.2f".format(needed) + (snr?.let { ", %.0f dB".format(it) } ?: "")
+            if (score != null && score >= needed && kept.isNotEmpty()) {
+                return Phrase(start, end, score, true, "$part ($bar)", kept.joinToString(" ") { it.text })
+            }
+            return isolated(owner, start, end, score)
+                ?: Phrase(start, end, score, false, "not you ($bar)", kept.ifEmpty { words }.joinToString(" ") { it.text })
         }
 
-        /** Speech loudness in dB, ignoring near-silent samples. */
-        private fun loudness(from: Int, to: Int): Float {
-            val loud = audio.copy(from, to).filter { kotlin.math.abs(it) > 0.01f }
-            if (loud.isEmpty()) return -99f
-            val rms = kotlin.math.sqrt(loud.sumOf { (it * it).toDouble() } / loud.size)
-            return (20 * kotlin.math.log10(rms + 1e-9)).toFloat()
-        }
-
-        /**
-         * Index of the word to cut before: the sentence break nearest to [cutAt] (an absolute
-         * sample position), within [SNAP_SAMPLES]. Null when there's no break near the change,
-         * which usually means it was one speaker after all.
-         */
-        private fun splitWords(words: List<Word>, cutAt: Int): Int? =
-            (1 until words.size)
-                .filter { i -> words[i - 1].endsSentence && kotlin.math.abs(words[i].start - cutAt) <= SNAP_SAMPLES }
-                .minByOrNull { i -> kotlin.math.abs(words[i].start - cutAt) }
-
-        /** The cut (on a quarter-second grid) where one side is clearly the owner and the other isn't. */
-        private fun bestSplit(profile: FloatArray, samples: FloatArray): Split? {
+        /** The owner's words pulled out of a mixed phrase by VoxLock, or null when that isn't possible or doesn't help. */
+        private fun isolated(owner: Voiceprint, start: Int, end: Int, score: Float?): Phrase? {
+            if ((score ?: 0f) < VoiceProfile.MIXED_MIN) return null
             val started = System.nanoTime()
-            var best: Triple<Int, Boolean, Pair<Float, Float>>? = null
-            for (cut in SPLIT_MIN_PART..samples.size - SPLIT_MIN_PART step SPLIT_STEP) {
-                val left = VoiceProfile.score(engines, profile, samples.copyOfRange(0, cut)) ?: 0f
-                val right = VoiceProfile.score(engines, profile, samples.copyOfRange(cut, samples.size)) ?: 0f
-                for ((keepRight, mine, other) in listOf(Triple(true, right, left), Triple(false, left, right))) {
-                    val margin = best?.third?.let { it.first - it.second }
-                    if (mine >= threshold && other <= SPLIT_OTHER_MAX && (margin == null || mine - other > margin)) {
-                        best = Triple(cut, keepRight, mine to other)
-                    }
-                }
-            }
+            val isolated = VoiceIsolator.isolate(context, audio.copy(start, end)) ?: return null
             val millis = (System.nanoTime() - started) / 1_000_000
-            return best?.let { (cut, keepRight, scores) -> Split(cut, keepRight, scores.first, scores.second, millis) }
+            val again = VoiceProfile.score(engines, owner, isolated) ?: return null
+            val needed = VoiceProfile.needed(threshold, (end - start) / RATE.toFloat(), meter?.snr(start, end))
+            if (again < needed) return null
+            val how = "isolated %.2f→%.2f in %d ms".format(score ?: 0f, again, millis)
+            return Phrase(start, end, again, true, how, recognize(isolated).joinToString(" ") { it.text })
         }
 
-        /** Words of a phrase, read with a little audio around it; word starts are absolute positions. */
+        /** Words of a phrase, read with a little audio around it; positions are absolute. */
         private fun transcribe(start: Int, end: Int): List<Word> {
             val from = maxOf(0, start - PAD_SAMPLES)
-            return recognize(audio.copy(from, minOf(audio.size, end + PAD_SAMPLES))).map { Word(it.text, it.start + from) }
+            val to = minOf(audio.size, end + PAD_SAMPLES)
+            return recognize(audio.copy(from, to)).let { words ->
+                words.mapIndexed { i, w ->
+                    val wordStart = w.start + from
+                    // A word's middle: halfway to the next word, at most a quarter second in.
+                    val next = words.getOrNull(i + 1)?.start?.plus(from) ?: to
+                    Word(w.text, wordStart, wordStart + minOf(MAX_HALF_WORD_SAMPLES, (next - wordStart) / 2))
+                }
+            }
         }
 
-        private fun text(start: Int, end: Int) = transcribe(start, end).joinToString(" ") { it.text }
-
-        /** Words in [samples], with start positions relative to the clip. */
-        /** [steer]: lean toward the user's names. Off for the live transcript, which re-reads clips too short to steer safely. */
+        /**
+         * Words in [samples], with start positions relative to the clip. [steer]: lean toward the
+         * user's names. Off for the live transcript, which re-reads clips too short to steer safely.
+         */
         private fun recognize(samples: FloatArray, steer: Boolean = true): List<Word> {
             if (samples.isEmpty()) return emptyList()
             val model = engines.recognizer
@@ -416,7 +340,7 @@ class PhoneListener(
                     if (token.startsWith(" ") || words.isEmpty()) words += StringBuilder(token.trim()) to at
                     else words.last().first.append(token)
                 }
-                return words.map { (text, at) -> Word(text.toString(), at) }.filter { it.text.isNotEmpty() }
+                return words.map { (text, at) -> Word(text.toString(), at, at) }.filter { it.text.isNotEmpty() }
             } finally {
                 stream.release()
             }
@@ -479,34 +403,24 @@ class PhoneListener(
         /** How often the live transcript is refreshed while you talk. */
         private const val LIVE_EVERY_SAMPLES = RATE * 4 / 10
 
-        /** Live check of who is talking: the last 1.5 s (at least 1 s) must sound like the owner. */
-        private const val LIVE_WINDOW_SAMPLES = RATE * 3 / 2
-        private const val LIVE_MIN_SAMPLES = RATE
-        private const val LIVE_SLACK = 0.05f
+        // Who is talking: a 1.5 s window of the current phrase scored every 0.4 s (0.5 s at the
+        // start of a phrase). Windows score a little lower than whole phrases, so their bar is
+        // a little lower too; the owner's part is checked as a whole at the strictness later.
+        private const val HOP_SAMPLES = RATE * 4 / 10
+        private const val WINDOW_SAMPLES = RATE * 3 / 2
+        private const val MIN_WINDOW_SAMPLES = RATE / 2
+        private const val WINDOW_SLACK = 0.05f
 
-        /** Above this a phrase is plainly the owner and isn't searched for a speaker change. */
-        private const val CLEARLY_YOU = 0.65f
+        /** A new phrase gets this long to be checked before the owner counts as having stopped. */
+        private const val FIRST_VERDICT_SAMPLES = MIN_WINDOW_SAMPLES + HOP_SAMPLES
 
-        // Speaker-change search: cuts every 0.25 s, each side at least 0.8 s, and the other
-        // side must score like someone else. The text is then cut at a sentence break within
-        // 0.7 s of that point.
-        private const val SPLIT_STEP = RATE / 4
-        private const val SPLIT_MIN_PART = RATE * 8 / 10
-        private const val SPLIT_OTHER_MAX = 0.30f
-        private const val SNAP_SAMPLES = RATE * 7 / 10
+        /** The owner's part covering this much of a phrase counts as the whole phrase, for the log. */
+        private const val WHOLE_PHRASE = 0.9f
 
-        /** Short answers: at most 1.2 s, and at least 3 dB louder than the voice they're attached to. */
-        private const val SHORT_ANSWER_MAX_SAMPLES = RATE * 6 / 5
-        private const val SHORT_ANSWER_LOUDER_DB = 3f
+        private const val MAX_HALF_WORD_SAMPLES = RATE / 4
 
         /** Extra wait when the last words don't sound like a finished sentence. */
         private const val UNFINISHED_EXTRA_SAMPLES = RATE
-
-        /** How much longer than the end pause another voice may run before the command ends. */
-        private const val OTHER_VOICES_EXTRA_SAMPLES = RATE * 3 / 2
-
-        /** The same, when the other voice ran on in the owner's phrase (the voice check lags ~1.5 s already). */
-        private const val OWNER_GONE_EXTRA_SAMPLES = RATE / 2
 
         /** Words people trail off on mid-thought; ending on one means "not done yet". */
         private val TRAILING_WORDS = setOf(

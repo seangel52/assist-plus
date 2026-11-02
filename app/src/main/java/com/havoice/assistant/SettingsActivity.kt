@@ -59,7 +59,10 @@ import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import kotlin.math.roundToInt
+import android.media.AudioManager
+import android.media.ToneGenerator
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -259,6 +262,23 @@ private val ENROLL_SENTENCES = listOf(
     "Add milk and eggs to the shopping list.",
 )
 
+// Setup recordings from across the room, marked by beeps since the screen is out of reach.
+private const val FAR_SENTENCE = "What's on my calendar today?"
+private const val FAR_TAKES = 3
+private const val FAR_WALK_MS = 8_000L
+
+/** A short beep that starts a recording (or a double one when the recordings are done). */
+private suspend fun beep(done: Boolean = false) {
+    try {
+        val tone = ToneGenerator(AudioManager.STREAM_MUSIC, 80)
+        tone.startTone(if (done) ToneGenerator.TONE_PROP_ACK else ToneGenerator.TONE_PROP_BEEP, 200)
+        delay(300)
+        tone.release()
+    } catch (e: RuntimeException) {
+        // No beep is fine.
+    }
+}
+
 /** Runs [action] once the microphone permission is granted, asking for it if needed. */
 @Composable
 private fun rememberMicAccess(onDenied: () -> Unit, action: () -> Unit): () -> Unit {
@@ -331,19 +351,34 @@ private fun VoiceIdSection(settings: HaSettings) {
         scope.launch {
             working = true
             try {
+                val noise = settings.noiseReduction
                 val clips = ENROLL_SENTENCES.mapIndexed { i, sentence ->
                     prompt = "Say (${i + 1} of ${ENROLL_SENTENCES.size}):\n\"$sentence\""
                     status = "Recording…"
                     val capture = Captures.Recorder()
-                    MicTest.record(context, seconds = 4, noise = settings.noiseReduction, capture = capture).also {
+                    MicTest.record(context, seconds = 4, noise = noise, capture = capture).also {
                         if (settings.saveRecordings) Captures.save(context, "enroll${i + 1}", capture, "\"$sentence\"")
                     }
                 }
+                // The same voice from across the room sounds different to voice ID; record it too.
+                prompt = "Now set the phone down about 10 feet away. After each beep, say \"$FAR_SENTENCE\" " +
+                    "at your normal volume (${FAR_TAKES} times)."
+                status = null
+                delay(FAR_WALK_MS)
+                val far = (1..FAR_TAKES).map { take ->
+                    status = "Recording from across the room ($take of $FAR_TAKES)…"
+                    beep()
+                    val capture = Captures.Recorder()
+                    MicTest.record(context, seconds = 4, noise = noise, capture = capture).also {
+                        if (settings.saveRecordings) Captures.save(context, "enroll_far$take", capture, "\"$FAR_SENTENCE\" from across the room")
+                    }
+                }
+                beep(done = true)
                 prompt = null
                 status = "Learning your voice…"
                 val consistency = withContext(Dispatchers.Default) {
                     val engines = SpeechEngines.get(context) ?: throw HaException("Speech engine failed to load")
-                    VoiceProfile.enroll(context, engines, clips)
+                    VoiceProfile.enroll(context, engines, clips, far, noise)
                 }
                 AppLog.i("Voice ID set up (consistency %.2f)".format(consistency))
                 enrolled = true
@@ -506,18 +541,29 @@ private fun WakeWordSection(settings: HaSettings) {
             working = true
             WakeWordService.pause(context)
             try {
-                val takes = (1..WAKE_TAKES).map { take ->
+                val near = (1..WAKE_TAKES).map { take ->
                     prompt = "Say \"${phrase.text}\" ($take of $WAKE_TAKES)"
                     VoiceProfile.toFloats(MicTest.record(context, seconds = 3))
                 }
+                // Tuned on close takes alone, it only answers when you're close; add far ones.
+                prompt = "Now set the phone down about 10 feet away. After each beep, say \"${phrase.text}\" " +
+                    "at your normal volume ($FAR_TAKES times)."
+                delay(FAR_WALK_MS)
+                val far = (1..FAR_TAKES).map { take ->
+                    status = "Recording from across the room ($take of $FAR_TAKES)…"
+                    beep()
+                    VoiceProfile.toFloats(MicTest.record(context, seconds = 3))
+                }
+                beep(done = true)
+                val takes = near + far
                 prompt = null
                 status = "Tuning…"
                 val profile = if (settings.voiceIdEnabled) VoiceProfile.load(context) else null
                 val (tuned, caught) = withContext(Dispatchers.Default) { WakeWords.tune(context, phrase.text, takes, profile) }
                 savePhrases(phrases.toMutableList().also { it[index] = tuned })
                 status = when {
-                    caught >= WAKE_TAKES - 1 -> "\"${phrase.text}\": caught $caught of $WAKE_TAKES. Ready."
-                    caught > 0 -> "\"${phrase.text}\": caught only $caught of $WAKE_TAKES. A longer or clearer phrase works better."
+                    caught >= takes.size - 1 -> "\"${phrase.text}\": caught $caught of ${takes.size} (close and far). Ready."
+                    caught > 0 -> "\"${phrase.text}\": caught only $caught of ${takes.size}. A longer or clearer phrase works better."
                     else -> "\"${phrase.text}\" wasn't recognized. Try a longer phrase with distinct sounds, like \"hey kitchen helper\"."
                 }
             } catch (e: Exception) {
@@ -914,24 +960,6 @@ private fun SettingsScreen(
                     },
                 )
             }
-
-            var wordFixes by remember { mutableStateOf(settings.wordFixes) }
-            Text("Word fixes", style = MaterialTheme.typography.titleMedium)
-            OutlinedTextField(
-                value = wordFixes,
-                onValueChange = {
-                    wordFixes = it
-                    settings.wordFixes = it
-                },
-                placeholder = { Text("nest cafe => Nescafe") },
-                minLines = 3,
-                modifier = Modifier.fillMaxWidth(),
-            )
-            Text(
-                "One per line, as heard => meant. Fixes words the speech model keeps getting wrong " +
-                    "before they're sent to Home Assistant.",
-                style = MaterialTheme.typography.bodySmall,
-            )
 
             var endPause by remember { mutableFloatStateOf(settings.endPauseSeconds) }
             Text("Pause before finishing: %.1f s".format(endPause), style = MaterialTheme.typography.titleMedium)

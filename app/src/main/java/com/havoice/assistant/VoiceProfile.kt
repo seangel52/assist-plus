@@ -7,9 +7,14 @@ import java.nio.ByteOrder
 import kotlin.math.sqrt
 
 /**
- * The owner's voiceprint: an average of the speaker embeddings from the setup phrases.
- * A phrase is "you" when its embedding points the same way (cosine similarity).
+ * The owner's voice as heard from different places: one average speaker embedding per
+ * recording condition (held close, and across the room). A voice far from the phone sounds
+ * different (quieter, more echo), so it is compared with the far version too: the score is
+ * the best match. [noise] is the noise reduction the setup recordings went through; anything
+ * scored against this voiceprint must go through the same ([VoiceProfile.asEnrolled]).
  */
+class Voiceprint(val centroids: List<FloatArray>, val noise: NoiseReduction)
+
 object VoiceProfile {
     /**
      * Default minimum similarity to accept a phrase as the owner's voice; adjustable in settings.
@@ -18,57 +23,114 @@ object VoiceProfile {
     const val DEFAULT_THRESHOLD = 0.45f
 
     /**
-     * Short phrases ("yes", "no thanks", "stop") are too little speech for a firm voice check: the
-     * owner's score anywhere from 0.3 to 0.6 while a TV or video scores about 0–0.16. So they are
-     * only turned away when clearly someone else.
+     * No phrase counts as the owner below this, however short or noisy: a TV or video scores
+     * 0–0.16 against the voiceprint, the owner's shortest, noisiest phrases about 0.3.
      */
-    const val SHORT_SECONDS = 1.3f
-    private const val SHORT_FLOOR = 0.25f
+    const val FLOOR = 0.25f
 
-    /** Phrases scoring at least this, but below the threshold, may be you mixed with another voice. */
+    // Short phrases ("yes", "no thanks") are too little speech for a firm voice check. The bar
+    // drops from the strictness (at 1.5 s of speech or more) to the floor (at 0.6 s or less).
+    private const val FULL_SECONDS = 1.5f
+    private const val SHORT_SECONDS = 0.6f
+
+    // A voice far from the phone, or over loud background sound, matches less well. The bar
+    // drops by up to NOISE_RELIEF as the speech gets closer to the background level.
+    private const val CLEAN_SNR_DB = 20f
+    private const val NOISY_SNR_DB = 6f
+    private const val NOISE_RELIEF = 0.06f
+
+    /** Phrases scoring at least this, but below the bar, may be the owner mixed with another voice. */
     const val MIXED_MIN = 0.2f
 
-    // "v3": TitaNet voiceprints. Older ones came from CAM++ (or, before v2, only 0.3 s of speech).
-    private fun file(context: Context) = File(context.filesDir, "voiceprint_v3.bin")
+    // "v4": several embeddings (close and far). v3 held one, from close recordings only.
+    private fun file(context: Context) = File(context.filesDir, "voiceprint_v4.bin")
+    private fun oldFile(context: Context) = File(context.filesDir, "voiceprint_v3.bin")
 
     /** The owner's speech from setup, as a WAV file — VoxLock's reference voice. */
     fun sampleFile(context: Context) = File(context.filesDir, "voice_sample_v2.wav")
 
-    fun load(context: Context): FloatArray? {
-        val f = file(context)
-        if (!f.exists()) return null
-        val buffer = ByteBuffer.wrap(f.readBytes()).order(ByteOrder.LITTLE_ENDIAN).asFloatBuffer()
-        return FloatArray(buffer.remaining()) { buffer.get(it) }
+    /**
+     * The bar a phrase must reach to count as the owner, for [base] (the strictness setting),
+     * [speechSeconds] of speech, and the speech's level above the background ([snrDb], null
+     * when unknown).
+     */
+    fun needed(base: Float, speechSeconds: Float, snrDb: Float?): Float {
+        val shortness = ((FULL_SECONDS - speechSeconds) / (FULL_SECONDS - SHORT_SECONDS)).coerceIn(0f, 1f)
+        val noisiness = snrDb?.let { ((CLEAN_SNR_DB - it) / (CLEAN_SNR_DB - NOISY_SNR_DB)).coerceIn(0f, 1f) } ?: 0f
+        val bar = base - shortness * (base - FLOOR).coerceAtLeast(0f) - noisiness * NOISE_RELIEF
+        return maxOf(FLOOR, bar)
     }
 
-    fun isEnrolled(context: Context) = file(context).exists()
+    fun load(context: Context): Voiceprint? {
+        val settings = HaSettings(context)
+        file(context).takeIf { it.exists() }?.let { f ->
+            val buffer = ByteBuffer.wrap(f.readBytes()).order(ByteOrder.LITTLE_ENDIAN)
+            val count = buffer.int
+            val size = buffer.int
+            val centroids = List(count) { FloatArray(size) { buffer.float } }
+            return Voiceprint(centroids, settings.voiceprintNoise)
+        }
+        // A close-only voiceprint from before far recordings; it was set up with the noise
+        // reduction chosen at the time, most likely today's.
+        val old = oldFile(context).takeIf { it.exists() } ?: return null
+        val buffer = ByteBuffer.wrap(old.readBytes()).order(ByteOrder.LITTLE_ENDIAN).asFloatBuffer()
+        return Voiceprint(listOf(FloatArray(buffer.remaining()) { buffer.get(it) }), settings.voiceprintNoise)
+    }
+
+    fun isEnrolled(context: Context) = file(context).exists() || oldFile(context).exists()
+
+    /** Whether the voiceprint includes the owner speaking from across the room. */
+    fun hasFarVoice(context: Context) = (load(context)?.centroids?.size ?: 0) > 1
 
     fun clear(context: Context) {
         file(context).delete()
+        oldFile(context).delete()
         sampleFile(context).delete()
     }
 
-    /** Builds and saves the voiceprint and voice sample from recorded setup phrases. Returns how consistent they were. */
-    fun enroll(context: Context, engines: SpeechEngines, clips: List<ByteArray>): Float {
-        val speech = clips.map { speechOnly(engines, toFloats(it)) }
-        val embeddings = speech.mapNotNull { embed(engines, it) }
-        require(embeddings.size >= 2) { "Couldn't hear enough speech in the recordings" }
-        val average = normalize(FloatArray(embeddings[0].size) { i -> embeddings.sumOf { it[i].toDouble() }.toFloat() })
-        val buffer = ByteBuffer.allocate(average.size * 4).order(ByteOrder.LITTLE_ENDIAN)
-        average.forEach { buffer.putFloat(it) }
-        file(context).writeBytes(buffer.array())
-        writeWav(sampleFile(context), speech.reduce { a, b -> a + b })
+    /**
+     * Builds and saves the voiceprint and voice sample from setup recordings: [near] held as
+     * usual, [far] from across the room (empty to skip). [noise] is what the recordings went
+     * through. Returns how consistent the close recordings were.
+     */
+    fun enroll(
+        context: Context,
+        engines: SpeechEngines,
+        near: List<ByteArray>,
+        far: List<ByteArray>,
+        noise: NoiseReduction,
+    ): Float {
+        val nearSpeech = near.map { speechOnly(engines, toFloats(it)) }
+        val nearEmbeddings = nearSpeech.mapNotNull { embed(engines, it) }
+        require(nearEmbeddings.size >= 2) { "Couldn't hear enough speech in the recordings" }
+        val farEmbeddings = far.mapNotNull { embed(engines, speechOnly(engines, toFloats(it))) }
+        val centroids = listOfNotNull(average(nearEmbeddings), farEmbeddings.takeIf { it.size >= 2 }?.let(::average))
 
-        val pairs = embeddings.indices.flatMap { i -> (i + 1 until embeddings.size).map { j -> cosine(embeddings[i], embeddings[j]) } }
+        val buffer = ByteBuffer.allocate(8 + centroids.sumOf { it.size } * 4).order(ByteOrder.LITTLE_ENDIAN)
+        buffer.putInt(centroids.size).putInt(centroids[0].size)
+        centroids.forEach { c -> c.forEach { buffer.putFloat(it) } }
+        file(context).writeBytes(buffer.array())
+        oldFile(context).delete()
+        HaSettings(context).voiceprintNoise = noise
+        writeWav(sampleFile(context), nearSpeech.reduce { a, b -> a + b })
+
+        val pairs = nearEmbeddings.indices.flatMap { i ->
+            (i + 1 until nearEmbeddings.size).map { j -> cosine(nearEmbeddings[i], nearEmbeddings[j]) }
+        }
+        val farToNear = farEmbeddings.map { cosine(it, centroids[0]) }
         AppLog.i(
-            "Voice ID setup: ${embeddings.size} clips, speech %s s, clip-to-clip similarity %s".format(
-                speech.joinToString("/") { "%.1f".format(it.size / MicRecorder.SAMPLE_RATE.toFloat()) },
+            "Voice ID setup: ${nearEmbeddings.size} close clips (similarity %s), ${farEmbeddings.size} far clips (vs close %s), noise %s".format(
                 pairs.joinToString("/") { "%.2f".format(it) },
+                farToNear.joinToString("/") { "%.2f".format(it) }.ifEmpty { "-" },
+                noise,
             ),
         )
-        // How alike the setup phrases are to each other: low values mean a noisy setup.
+        // How alike the close setup phrases are to each other: low values mean a noisy setup.
         return pairs.min()
     }
+
+    private fun average(embeddings: List<FloatArray>) =
+        normalize(FloatArray(embeddings[0].size) { i -> embeddings.sumOf { it[i].toDouble() }.toFloat() })
 
     private fun writeWav(target: File, samples: FloatArray) {
         val rate = MicRecorder.SAMPLE_RATE
@@ -82,11 +144,23 @@ object VoiceProfile {
         target.writeBytes(out.array())
     }
 
-    /** Similarity (−1…1) between a phrase and the voiceprint. */
-    fun score(engines: SpeechEngines, profile: FloatArray, samples: FloatArray): Float? =
-        embed(engines, samples)?.let { cosine(it, profile) }
+    /** Similarity (−1…1) between a phrase and the closest version of the owner's voice. */
+    fun score(engines: SpeechEngines, profile: Voiceprint, samples: FloatArray): Float? =
+        embed(engines, samples)?.let { e -> profile.centroids.maxOf { cosine(e, it) } }
 
-    fun thresholdFor(seconds: Float, base: Float) = if (seconds < SHORT_SECONDS) minOf(base, SHORT_FLOOR) else base
+    /**
+     * Raw microphone audio put through the same noise reduction as the setup recordings, so it
+     * can be compared fairly (the wake word listener, for one, hears the raw mic).
+     */
+    fun asEnrolled(context: Context, profile: Voiceprint, raw: FloatArray): FloatArray {
+        val filter = NoiseFilter.offline(context, profile.noise) ?: return raw
+        return synchronized(filter) {
+            filter.reset()
+            val out = filter.process(raw) + filter.flushSamples()
+            filter.reset()
+            out
+        }
+    }
 
     private fun embed(engines: SpeechEngines, samples: FloatArray): FloatArray? {
         if (samples.size < MicRecorder.SAMPLE_RATE / 4) return null

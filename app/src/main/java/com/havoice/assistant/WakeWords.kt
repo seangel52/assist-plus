@@ -3,6 +3,7 @@ package com.havoice.assistant
 import android.annotation.SuppressLint
 import android.content.Context
 import android.media.AudioFormat
+import android.media.AudioManager
 import android.media.AudioRecord
 import android.media.MediaRecorder
 import android.media.audiofx.AcousticEchoCanceler
@@ -100,9 +101,11 @@ object WakeWords {
             maxOf(AudioRecord.getMinBufferSize(rate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT), chunk * 4),
         )
         // Music or a video playing from this phone comes straight back into its mic and buries
-        // the wake phrase; the phone's echo canceller subtracts its own sound.
+        // the wake phrase; the phone's echo canceller subtracts its own sound. It also softens a
+        // distant voice, so it only runs while the phone is playing something.
+        val audioManager = context.getSystemService(AudioManager::class.java)
         val echoCanceller = if (AcousticEchoCanceler.isAvailable()) {
-            AcousticEchoCanceler.create(record.audioSessionId)?.apply { enabled = true }
+            AcousticEchoCanceler.create(record.audioSessionId)?.apply { enabled = audioManager.isMusicActive }
         } else {
             null
         }
@@ -119,7 +122,11 @@ object WakeWords {
             while (isActive) {
                 val read = record.read(buffer, 0, buffer.size)
                 if (read <= 0) continue
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && ++chunksRead % SILENCE_CHECK_CHUNKS == 0) {
+                if (++chunksRead % SILENCE_CHECK_CHUNKS == 0) echoCanceller?.let { aec ->
+                    val playing = audioManager.isMusicActive
+                    if (aec.enabled != playing) aec.enabled = playing
+                }
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && chunksRead % SILENCE_CHECK_CHUNKS == 0) {
                     val now = record.activeRecordingConfiguration?.isClientSilenced == true
                     if (now != silenced) {
                         silenced = now
@@ -171,12 +178,14 @@ object WakeWords {
         val profile = if (settings.wakeOnlyMyVoice && settings.voiceIdEnabled) VoiceProfile.load(context) else null
         profile ?: return true to null
         val engines = SpeechEngines.get(context) ?: return true to null
-        val score = VoiceProfile.score(engines, profile, VoiceProfile.speechOnly(engines, audio)) ?: 0f
-        val needed = minOf(phrase.voiceMin ?: WAKE_VOICE_MIN, WAKE_VOICE_MIN)
+        val clean = VoiceProfile.asEnrolled(context, profile, audio)
+        val score = VoiceProfile.score(engines, profile, VoiceProfile.speechOnly(engines, clean)) ?: 0f
+        val needed = WAKE_VOICE_MIN
         return (score >= needed) to score
     }
 
-    // In noisy rooms the owner's wake phrase has scored as low as 0.23.
+    // In noisy rooms, or from across the room, the owner's wake phrase has scored as low as 0.2;
+    // a TV or video scores about 0–0.16. (Tuning records each phrase's own scores in the log.)
     private const val WAKE_VOICE_MIN = 0.15f
 
     // About every 2 seconds (200 ms reads).
@@ -193,7 +202,7 @@ object WakeWords {
      * lowest voice ID score seen (minus a margin) for the voice check.
      * Returns the tuned phrase and how many recordings it caught.
      */
-    fun tune(context: Context, phrase: String, clips: List<FloatArray>, profile: FloatArray?): Pair<WakePhrase, Int> {
+    fun tune(context: Context, phrase: String, clips: List<FloatArray>, profile: Voiceprint?): Pair<WakePhrase, Int> {
         val spotter = WakeSpotter.get(context) ?: throw HaException("Couldn't load the wake word model")
         val tokens = WakeTokenizer.get(context).encode(phrase)
         if (tokens.isEmpty()) throw HaException("Type a wake phrase first")
@@ -211,7 +220,7 @@ object WakeWords {
         }
         val voiceMin = profile?.let { owner ->
             val engines = SpeechEngines.get(context) ?: return@let null
-            clips.mapNotNull { VoiceProfile.score(engines, owner, VoiceProfile.speechOnly(engines, it)) }
+            clips.mapNotNull { VoiceProfile.score(engines, owner, VoiceProfile.speechOnly(engines, VoiceProfile.asEnrolled(context, owner, it))) }
                 .minOrNull()?.let { maxOf(0.15f, it - 0.10f) }
         }
         val tuned = WakePhrase(phrase, threshold = maxOf(LOWEST_THRESHOLD, chosen - 0.05f), voiceMin = voiceMin)
