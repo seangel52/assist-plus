@@ -401,12 +401,13 @@ class PhoneListener(
         /** How often the live transcript is refreshed while you talk. */
         private const val LIVE_EVERY_SAMPLES = RATE * 4 / 10
 
-        // Who is talking: a 1.5 s window of the current phrase scored every 0.4 s (from 1 s into
-        // a phrase; a shorter phrase is scored once, whole, when it ends). Windows score a little lower than whole phrases, so their bar is
+        // Who is talking: a 1.5 s window of the current phrase scored every 0.4 s, from 0.5 s in;
+        // a phrase no longer than a window is also scored whole when it ends. Windows score a
+        // little lower than whole phrases, so their bar is
         // a little lower too; the owner's part is checked as a whole at the strictness later.
         private const val HOP_SAMPLES = RATE * 4 / 10
         private const val WINDOW_SAMPLES = RATE * 3 / 2
-        private const val MIN_WINDOW_SAMPLES = RATE
+        private const val MIN_WINDOW_SAMPLES = RATE / 2
         private const val MIN_PHRASE_SAMPLES = RATE / 4
         private const val WINDOW_SLACK = 0.05f
 
