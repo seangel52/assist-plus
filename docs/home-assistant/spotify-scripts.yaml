@@ -15,34 +15,40 @@
 # Notes:
 #   - Spotify ignores single-song play requests from personal developer apps, so a song is
 #     played as its album starting at that song.
-#   - Spotify only lists a phone while its Spotify app is running; spotify_play opens it first
-#     with a Companion app command and waits until Spotify lists it.
+#   - Spotify only lists a phone while its Spotify app is running. spotify_play asks Assist Plus
+#     to open it (the assist_plus_open_app event; Assist Plus is open while you ask), with a
+#     Companion app command as the backup for requests from elsewhere. Android only lets the
+#     Companion app open apps when its "Appear on top" permission is on.
 
 spotify_play:
-  alias: Play music on Spotify
+  alias: Play music or a podcast on Spotify
   description: >-
-    Play a song, artist, album or one of the user's playlists on Spotify, on the user's phone or
-    on a speaker or TV in the house. Searches Spotify, so any song or artist works. Use for
-    requests like 'play Dare You by Papadosio', 'play some Khruangbin in the kitchen', 'play my
-    Road Trip playlist'.
+    Play a song, artist, album, one of the user's playlists, or a podcast on Spotify, on the
+    user's phone or on a speaker or TV in the house. Searches Spotify, so any song, artist or show
+    works; a podcast plays its newest episode. For a vague podcast request ('a funny podcast')
+    pick one specific, popular show yourself and pass its name: Spotify's search isn't ranked by
+    popularity. Use for requests like 'play Dare You by Papadosio', 'play some Khruangbin in the
+    kitchen', 'play my Road Trip playlist', 'play the newest Good Hang'.
   icon: mdi:spotify
   mode: queued
   fields:
     query:
       name: What to play
       description: >-
-        Song with artist ('Dare You by Papadosio'), artist ('Papadosio'), album, or playlist name
-        ('Road Trip'). Fix obvious misspellings of artist names first.
+        Song with artist ('Dare You by Papadosio'), artist ('Papadosio'), album, playlist name
+        ('Road Trip'), or podcast show name ('Good Hang'). Fix obvious misspellings first.
       required: true
       selector:
         text: {}
     kind:
       name: Kind
-      description: song, artist, album or playlist. A bare band or singer name is 'artist'.
+      description: >-
+        song, artist, album, playlist or podcast. A bare band or singer name is 'artist'; a show
+        or podcast name is 'podcast'.
       required: true
       selector:
         select:
-          options: [song, artist, album, playlist]
+          options: [song, artist, album, playlist, podcast]
     device:
       name: Where
       description: >-
@@ -76,6 +82,11 @@ spotify_play:
             - condition: template
               value_template: "{{ phone not in (known.result | default([]) | map(attribute='name') | list) }}"
           then:
+            # Assist Plus opens Spotify on the phone when the request came from it.
+            - event: assist_plus_open_app
+              event_data:
+                package: com.spotify.music
+            # Backup for requests from elsewhere: needs the Companion app's "Appear on top" permission.
             - action: notify.mobile_app_YOUR_PHONE
               data:
                 message: command_launch_app
@@ -94,6 +105,18 @@ spotify_play:
                 until:
                   - condition: template
                     value_template: "{{ phone in (known.result | default([]) | map(attribute='name') | list) or repeat.index >= 8 }}"
+            - if:
+                - condition: template
+                  value_template: "{{ phone not in (known.result | default([]) | map(attribute='name') | list) }}"
+              then:
+                - variables:
+                    result:
+                      error: >-
+                        Spotify didn't open on the phone, so it can't play there. Assist Plus opens
+                        it when the request comes from Assist Plus; from anywhere else the Home
+                        Assistant app needs its 'Appear on top' permission.
+                - stop: Phone not available
+                  response_variable: result
     - choose:
         - conditions:
             - condition: template
@@ -189,6 +212,48 @@ spotify_play:
             - variables:
                 result:
                   playing: "{{ item.name }} by {{ item.artists | map(attribute='name') | join(', ') }}"
+                  "on": "{{ target }}"
+        - conditions:
+            - condition: template
+              value_template: "{{ kind == 'podcast' }}"
+          sequence:
+            - action: spotifyplus.search_shows
+              data:
+                entity_id: "{{ account }}"
+                criteria: "{{ query }}"
+                limit: 1
+              response_variable: found
+            - variables:
+                item: "{{ (found.result['items'] | default([]) | first) or {} }}"
+            - if:
+                - condition: template
+                  value_template: "{{ not item }}"
+              then:
+                - variables:
+                    result:
+                      error: "No podcast found for {{ query }}"
+                - stop: Nothing found
+                  response_variable: result
+            # Spotify lists a show's episodes newest first.
+            - action: spotifyplus.get_show_episodes
+              data:
+                entity_id: "{{ account }}"
+                show_id: "{{ item.id }}"
+                limit: 1
+              response_variable: episodes
+            - variables:
+                episode: "{{ (episodes.result['items'] | default([]) | first) or {} }}"
+            - action: spotifyplus.player_media_play_context
+              data:
+                entity_id: "{{ account }}"
+                context_uri: "{{ item.uri }}"
+                offset_uri: "{{ episode.uri if episode else '' }}"
+                device_id: "{{ target }}"
+                delay: 1
+            - variables:
+                result:
+                  playing: >-
+                    {% if episode %}the newest episode of {{ item.name }}, '{{ episode.name }}'{% else %}{{ item.name }}{% endif %}
                   "on": "{{ target }}"
       default:
         # Your own playlists first: Spotify search can't see private ones.

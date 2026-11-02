@@ -14,8 +14,8 @@ android {
         applicationId = "com.havoice.assistant"
         minSdk = 26
         targetSdk = 35
-        versionCode = 3
-        versionName = "0.2.1"
+        versionCode = 4
+        versionName = "0.3.0"
 
         // Modern phones (including the Galaxy S25) are 64-bit ARM; skipping the other
         // CPU types keeps the speech engine from tripling the app size.

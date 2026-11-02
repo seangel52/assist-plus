@@ -1,0 +1,55 @@
+# Phone tools for your Home Assistant voice agent, carried out by Assist Plus.
+#
+# While Assist Plus is open on the phone it listens for these Home Assistant events, so a
+# script can act on the phone you're talking to:
+#   - assist_plus_set_volume  data: level (0-100), stream ("all" = media and the assistant's
+#                             voice, the default; or media, assistant, ring, alarm, notification)
+#   - assist_plus_open_app    data: package (like com.spotify.music); see spotify-scripts.yaml
+# Events fired while Assist Plus isn't open are ignored (there's no phone listening then).
+#
+# Setup: add the script (Settings > Automations & scenes > Scripts > Add > Edit in YAML), then
+# Settings > Voice assistants > Expose: expose it to Assist.
+
+phone_volume:
+  alias: Set the phone's volume
+  description: >-
+    Set a volume on the user's phone, the one they're talking to Assist on: 'turn my phone to 75
+    percent', 'phone volume all the way up', 'mute my ringer'. Unless they name one, it sets
+    everything the phone plays out loud (media and the assistant's voice) together. For speakers
+    and TVs use their own controls instead.
+  icon: mdi:cellphone-sound
+  mode: queued
+  fields:
+    level:
+      name: Level
+      description: >-
+        Percent, 0 to 100. 'Half' is 50, 'all the way up' is 100, 'mute' is 0.
+      required: true
+      selector:
+        number:
+          min: 0
+          max: 100
+          step: 1
+          unit_of_measurement: "%"
+          mode: box
+    stream:
+      name: Which volume
+      description: >-
+        Leave as 'all' (media and the assistant's voice) unless they name one: media, assistant,
+        ring, alarm or notification.
+      required: false
+      default: all
+      selector:
+        select:
+          options: [all, media, assistant, ring, alarm, notification]
+  sequence:
+    - event: assist_plus_set_volume
+      event_data:
+        level: "{{ level | int }}"
+        stream: "{{ stream | default('all') }}"
+    - variables:
+        result:
+          set: "{{ 'media and assistant' if (stream | default('all')) == 'all' else stream }} volume"
+          to: "{{ level | int }} percent"
+    - stop: Sent
+      response_variable: result

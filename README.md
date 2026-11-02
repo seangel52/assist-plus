@@ -18,12 +18,14 @@ I built this with Claude because I wanted the Assist experience to work for my f
 
 ## What it does
 
-- **Isolates your voice.** On-device noise removal plus voice ID: phrases from the TV, a YouTube video or the kids are dropped, and when a video runs straight into your sentence it's cut at the sentence break so only your words are sent.
+- **Isolates your voice.** On-device noise removal plus voice ID that tracks who is talking every 0.4 s: words from the TV, a YouTube video or the kids are dropped, even when they run straight into or over your sentence, and the command ends when *you* stop talking, not when the room goes quiet.
+- **Works from across the room.** Voice setup and wake word setup include a few takes from about 10 feet away, and the voice check allows for a distant voice or a loud background (never below what a TV scores).
 - **Speech to text on the phone.** Your words appear on screen *as you speak*, not at the end. Home Assistant only ever receives text.
-- **Better conversations.** Hands-free follow-ups, room to pause and think before it decides you're done, "cancel" / "never mind" to close it, and the agent can end the conversation itself.
+- **Better conversations.** Hands-free follow-ups, room to pause and think before it decides you're done, "cancel" / "never mind" to close it, and the agent can end the conversation itself. Say the wake word or tap the mic to cut a reply short. Names it mishears can be taught: the agent tags a correction and the app listens for that name from then on.
 - **Custom wake words.** Pick any phrase, record it a few times so it learns how you say it. Optional spoken PIN when the phone is locked (experimental).
 - **Phone actions.** "Take me to Target on Main Street" and "set a timer for 10 minutes" are done right on the phone in Google Maps (or Waze) and your clock app. Addresses are checked first, so a misheard house number becomes a "Did you mean…?" instead of a wrong turn. Everything else goes to Home Assistant.
-- **Music through Home Assistant.** With [SpotifyPlus](#music-spotify) on the server, "play Dare You by Papadosio", "next song", "what's playing" and "add this song to Road Trip" work on your phone or any speaker in the house — even on mobile data.
+- **Music and podcasts through Home Assistant.** With [SpotifyPlus](#music-spotify) on the server, "play Dare You by Papadosio", "play the newest Good Hang", "next song", "what's playing" and "add this song to Road Trip" work on your phone or any speaker in the house — even on mobile data.
+- **Home Assistant can act on the phone.** While Assist is open, scripts can set the phone's volume or open an app on it ([`docs/home-assistant/phone-scripts.yaml`](docs/home-assistant/phone-scripts.yaml)).
 - **Photos, files and barcodes.** Snap a barcode and say "I had one serving of this"; send a photo and say "remember this wine". The phone reads barcodes itself and looks them up in Open Food Facts; photos are described by your Home Assistant AI Task.
 - **Looks like Home Assistant.** The Assist sheet copies the Companion app's design, and it uses your existing pipelines, agents and voices.
 
@@ -32,7 +34,7 @@ I built this with Claude because I wanted the Assist experience to work for my f
 ```
 Phone:  mic → noise removal → speech detection → live speech-to-text (Parakeet)
                                       ↓
-                    voice ID (TitaNet): keep your phrases, drop other voices
+                    voice ID (TitaNet): who is talking, every 0.4 s; keep your words
                                       ↓
 Home Assistant:            text → your Assist pipeline → conversation agent → reply (+ voice)
 ```
@@ -50,7 +52,7 @@ Measured on a Samsung Galaxy S25 with a loud cooking video playing on a nearby c
 | WeSpeaker CAM++ (first try) | 0.38–0.60 | 0.57–0.63 | No — the video scored *higher* |
 | **NVIDIA TitaNet small (used)** | **0.70–0.87** | **0.12–0.16** | **Yes, wide gap** |
 
-**What got sent with the video playing**
+**What got sent with the video playing** (measured with the earlier version, which judged whole phrases)
 
 | What the mic heard | What Assist Plus sent |
 |---|---|
@@ -69,7 +71,7 @@ Before this, with speech-to-text in the cloud and no voice filtering, the same s
 | Speech-to-text of a whole command (Parakeet, on phone) | 30–80 ms |
 | Live words on screen | refreshed every 0.4 s while you talk |
 | Deciding you're done | 1.2 s after a finished sentence (adjustable), +1 s if you trail off |
-| Splitting a phrase where another voice runs into yours | 0.1–1 s, only when needed |
+| Checking who is talking | a 1.5 s window every 0.4 s while you talk |
 | Models loading on first open | 1.5–3.5 s (the mic records meanwhile, nothing is lost) |
 | The agent's reply | depends on your agent; typically 1.5–5 s for a cloud LLM |
 
@@ -98,8 +100,8 @@ Before this, with speech-to-text in the cloud and no voice filtering, the same s
 1. Open **Assist Plus**, enter your Home Assistant address and token, tap **Test connection & save**, and pick your assistant (pipeline).
 2. **Make it the default assistant:** tap **Open default apps settings** → **Digital assistant app** → **Assist Plus**. On Samsung phones, also set **Settings → Advanced features → Side button → Press and hold → Digital assistant**.
 3. Long-press the side/power button (or home) and talk. You can switch assistants from the sheet's title.
-4. **Voice ID (recommended in a busy house):** Voice ID → **Set up my voice** (six short commands, normal distance), then **Only respond to my voice**.
-5. **Wake word (optional):** Wake word → add a phrase (3+ syllables of everyday words work best), tap **Record**, allow **open over other apps**. Android shows a notification while it listens.
+4. **Voice ID (recommended in a busy house):** Voice ID → **Set up my voice** (six short commands at normal distance, then three from across the room after each beep), then **Only respond to my voice**.
+5. **Wake word (optional):** Wake word → add a phrase (3+ syllables of everyday words work best), tap **Record** (five takes close, three from across the room), allow **open over other apps**. Setup shows how many close and far takes it caught. Android shows a notification while it listens.
 
 The Home Assistant Companion app keeps working as before for dashboards, notifications and location — Assist Plus only replaces the assistant panel.
 
@@ -111,7 +113,7 @@ Spotify doesn't accept play requests from other apps on the phone, so music is h
 2. **Add the four music tools** from [`docs/home-assistant/spotify-scripts.yaml`](docs/home-assistant/spotify-scripts.yaml) (play, control, what's playing, add to playlist). Replace the three `YOUR_…` placeholders first.
 3. **Expose them to the assistant:** Settings → **Voice assistants** → **Expose** → add the four scripts.
 
-Your agent then picks the right tool on its own: "play some Khruangbin in the kitchen", "skip ahead 30 seconds", "who sings this?", "add this song to Road Trip". Spotify only lists a phone while its app is open; the play tool opens Spotify on the phone first (through the Companion app).
+Your agent then picks the right tool on its own: "play some Khruangbin in the kitchen", "skip ahead 30 seconds", "who sings this?", "add this song to Road Trip". Spotify only lists a phone while its app is open; the play tool has Assist Plus open Spotify on the phone first (the Companion app is the backup, and needs its **Appear on top** permission for that).
 
 ## Recommended agent instructions
 
@@ -127,9 +129,11 @@ A message may end with notes in square brackets, like [Attached photo …] or [S
 Only ask a follow-up question when it continues what the user asked. Don't offer unrelated tasks.
 
 When the user is wrapping up (thanks, that's all, never mind, cancel, goodbye), give a brief sign-off and put [end] at the very end of your reply.
+
+When you realize a name was misheard (the user corrected it, or it's clear from context), add a tag like [heard: Marlin -> Marlon] at the very end of your reply.
 ```
 
-The `[end]` tag lets the app close the assistant when the conversation is over; it's removed before anything is shown or spoken.
+The `[end]` tag lets the app close the assistant when the conversation is over, and `[heard: … -> …]` teaches it a name to listen for (see the Dictionary in Settings); both are removed before anything is shown or spoken.
 
 ## Privacy and security
 
@@ -156,7 +160,8 @@ Requires JDK 17 and the Android SDK (command-line tools are enough).
 
 Fork it, improve it, send pull requests, or take the ideas to the [Home Assistant Companion app](https://github.com/home-assistant/android). Things I'd like next:
 
-- More phone actions: alarms, calls and texts, opening any app.
+- More phone actions: alarms, calls and texts.
+- A custom-trained wake word model, for better range than the general keyword spotter.
 - Models downloaded on first launch instead of bundled (smaller APK).
 - More languages (the models are English-only today).
 
