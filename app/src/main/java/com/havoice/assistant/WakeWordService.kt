@@ -86,6 +86,12 @@ class WakeWordService : Service(), SensorEventListener {
                 if (!sleeping) startListening()
                 return START_STICKY
             }
+            ACTION_RELOAD -> {
+                // New phrases or settings: listening reads them when it starts again.
+                stopListening()
+                if (!sleeping) startListening()
+                return START_STICKY
+            }
         }
         try {
             ServiceCompat.startForeground(
@@ -270,6 +276,7 @@ class WakeWordService : Service(), SensorEventListener {
         private const val IN_ASSIST = "Assist is open and listening for the wake word there"
         private const val ACTION_PAUSE = "pause"
         private const val ACTION_RESUME = "resume"
+        private const val ACTION_RELOAD = "reload"
         private const val ACTION_START_PAUSED = "start_paused"
         private const val BATTERY_LOG_MS = 30 * 60_000L
         private const val MOTION_BATCH_US = 10_000_000
@@ -331,6 +338,18 @@ class WakeWordService : Service(), SensorEventListener {
         fun resume(context: Context) {
             if (running == null) return
             context.startService(Intent(context, WakeWordService::class.java).setAction(ACTION_RESUME))
+        }
+
+        /**
+         * Applies changed wake phrases or settings. A running service just restarts its listening
+         * (stopping and starting the service raced, and Android may refuse the new start).
+         */
+        fun reload(context: Context) {
+            if (running == null) {
+                start(context)
+                return
+            }
+            context.startService(Intent(context, WakeWordService::class.java).setAction(ACTION_RELOAD))
         }
 
         fun stop(context: Context) {

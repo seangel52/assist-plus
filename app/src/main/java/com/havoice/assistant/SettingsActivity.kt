@@ -507,9 +507,7 @@ private fun WakeWordSection(settings: HaSettings) {
     var working by remember { mutableStateOf(false) }
 
     fun restartIfOn() {
-        if (!enabled) return
-        WakeWordService.stop(context)
-        WakeWordService.start(context)
+        if (enabled) WakeWordService.reload(context)
     }
 
     fun savePhrases(updated: List<WakePhrase>) {

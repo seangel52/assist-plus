@@ -276,7 +276,15 @@ class PhoneListener(
             val snr = meter?.snr(spans.first().first, spans.last().last + 1)
             val needed = VoiceProfile.needed(threshold, seconds, snr)
             val score = VoiceProfile.score(engines, owner, ownerAudio)
-            val kept = words.filter { w -> spans.any { w.mid in it } }
+            // The speech detector trims a phrase tightly, so a first or last word can sit partly
+            // outside it: a stretch of the owner's speech that reaches the phrase's edge covers
+            // the words read from the padding there too.
+            val reach = spans.map { span ->
+                val from = if (span.first - start < HOP_SAMPLES) start - PAD_SAMPLES else span.first
+                val to = if (end - (span.last + 1) < HOP_SAMPLES) end + PAD_SAMPLES else span.last + 1
+                from until to
+            }
+            val kept = words.filter { w -> reach.any { w.mid in it } }
             val part = if (seconds * RATE >= (end - start) * WHOLE_PHRASE) {
                 "you"
             } else {
