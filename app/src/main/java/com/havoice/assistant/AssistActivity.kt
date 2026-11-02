@@ -1091,11 +1091,38 @@ class AssistActivity : ComponentActivity() {
                 throw e
             }
             try {
-                it.onOpenApp { app -> runOnUiThread { openAppForAssistant(app) } }
+                it.onPhoneEvent(HaClient.OPEN_APP_EVENT) { data ->
+                    data.optString("package").takeIf { app -> app.isNotBlank() }?.let { app -> runOnUiThread { openAppForAssistant(app) } }
+                }
+                it.onPhoneEvent(HaClient.SET_VOLUME_EVENT) { data ->
+                    runOnUiThread { setPhoneVolume(data.optInt("level", -1), data.optString("stream", "media")) }
+                }
             } catch (e: HaException) {
-                AppLog.w("Home Assistant won't let Assist open apps: ${e.message}")
+                AppLog.w("Home Assistant won't let Assist act on the phone: ${e.message}")
             }
         }
+
+    /** Sets one of the phone's volumes to [level] percent, because a Home Assistant script asked to. */
+    private fun setPhoneVolume(level: Int, stream: String) {
+        val type = when (stream.lowercase()) {
+            "ring", "ringer" -> AudioManager.STREAM_RING
+            "alarm" -> AudioManager.STREAM_ALARM
+            "notification", "notifications" -> AudioManager.STREAM_NOTIFICATION
+            else -> AudioManager.STREAM_MUSIC
+        }
+        if (level !in 0..100) {
+            AppLog.w("Home Assistant asked for volume $level, which isn't 0–100")
+            return
+        }
+        val max = audioManager.getStreamMaxVolume(type)
+        try {
+            audioManager.setStreamVolume(type, Math.round(level / 100f * max), AudioManager.FLAG_SHOW_UI)
+            AppLog.i("Set the phone's $stream volume to $level%")
+        } catch (e: SecurityException) {
+            // Do Not Disturb keeps apps from changing the ring and notification volumes.
+            AppLog.w("Couldn't set the $stream volume: ${e.message}")
+        }
+    }
 
     /** Set once Home Assistant opened another app for the request; Assist then closes after replying. */
     private var openedOtherApp = false

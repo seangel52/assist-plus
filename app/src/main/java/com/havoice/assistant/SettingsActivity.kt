@@ -559,11 +559,14 @@ private fun WakeWordSection(settings: HaSettings) {
                 prompt = null
                 status = "Tuning…"
                 val profile = if (settings.voiceIdEnabled) VoiceProfile.load(context) else null
-                val (tuned, caught) = withContext(Dispatchers.Default) { WakeWords.tune(context, phrase.text, takes, profile) }
-                savePhrases(phrases.toMutableList().also { it[index] = tuned })
+                val result = withContext(Dispatchers.Default) { WakeWords.tune(context, phrase.text, takes, profile, farFrom = near.size) }
+                savePhrases(phrases.toMutableList().also { it[index] = result.phrase })
+                val caught = result.near + result.far
+                val counts = "close ${result.near} of ${near.size}, across the room ${result.far} of ${far.size}"
                 status = when {
-                    caught >= takes.size - 1 -> "\"${phrase.text}\": caught $caught of ${takes.size} (close and far). Ready."
-                    caught > 0 -> "\"${phrase.text}\": caught only $caught of ${takes.size}. A longer or clearer phrase works better."
+                    caught >= takes.size - 1 -> "\"${phrase.text}\": caught $counts. Ready."
+                    result.far == 0 && result.near > 0 -> "\"${phrase.text}\": $counts. It doesn't hear this phrase from across the room yet."
+                    caught > 0 -> "\"${phrase.text}\": caught only $counts. A longer or clearer phrase works better."
                     else -> "\"${phrase.text}\" wasn't recognized. Try a longer phrase with distinct sounds, like \"hey kitchen helper\"."
                 }
             } catch (e: Exception) {

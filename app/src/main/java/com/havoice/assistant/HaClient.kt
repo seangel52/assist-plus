@@ -57,9 +57,9 @@ class HaClient(baseUrl: String, private val token: String) {
     private var nextId = 1
     private val lock = Mutex()
 
-    // Home Assistant asking this phone to open an app (event "assist_plus_open_app"), see [onOpenApp].
-    private var openAppSubscription = -1
-    private var openAppHandler: ((String) -> Unit)? = null
+    // Home Assistant asking this phone to do something (open an app, set the volume), see [onPhoneEvent]:
+    // handlers by subscription id.
+    private val phoneEventHandlers = mutableMapOf<Int, (JSONObject) -> Unit>()
 
     suspend fun connect() {
         val request = try {
@@ -96,16 +96,15 @@ class HaClient(baseUrl: String, private val token: String) {
     }
 
     /**
-     * Lets Home Assistant open an app on this phone while Assist is open: a script fires the
-     * event "assist_plus_open_app" with the app's package ("com.spotify.music"), and [handler]
-     * gets the package. Spotify, for one, only plays on a phone while its app is running.
+     * Lets Home Assistant scripts act on this phone while Assist is open: a script fires
+     * [eventType] (see [OPEN_APP_EVENT], [SET_VOLUME_EVENT]) and [handler] gets the event's data.
      */
-    suspend fun onOpenApp(handler: (String) -> Unit) = timed(10_000, "Home Assistant to accept the subscription") {
-        openAppHandler = handler
-        val id = sendCommand(JSONObject().put("type", "subscribe_events").put("event_type", OPEN_APP_EVENT))
-        awaitResult(id)
-        openAppSubscription = id
-    }
+    suspend fun onPhoneEvent(eventType: String, handler: (JSONObject) -> Unit) =
+        timed(10_000, "Home Assistant to accept the subscription") {
+            val id = sendCommand(JSONObject().put("type", "subscribe_events").put("event_type", eventType))
+            awaitResult(id)
+            phoneEventHandlers[id] = handler
+        }
 
     suspend fun listPipelines(): PipelineList = timed(10_000, "the pipeline list") {
         val id = sendCommand(JSONObject().put("type", "assist_pipeline/pipeline/list"))
@@ -346,8 +345,8 @@ class HaClient(baseUrl: String, private val token: String) {
         if ("://" in url) httpBase + "/" + url.substringAfter("://").substringAfter('/', "") else httpBase + url
 
     /**
-     * The next message for the request in progress. An "open an app" event can arrive in the
-     * middle of any request (a script fires it while the agent works); it's handled here.
+     * The next message for the request in progress. A phone event ("open Spotify") can arrive in
+     * the middle of any request (a script fires it while the agent works); it's handled here.
      */
     private suspend fun receive(): JSONObject {
         while (true) {
@@ -356,8 +355,11 @@ class HaClient(baseUrl: String, private val token: String) {
             } catch (e: ClosedReceiveChannelException) {
                 throw HaException("Home Assistant closed the connection")
             }
-            if (openAppSubscription >= 0 && message.optInt("id") == openAppSubscription && message.optString("type") == "event") {
-                message.optJSONObject("event")?.optJSONObject("data")?.optStringOrNull("package")?.let { openAppHandler?.invoke(it) }
+            val handler = phoneEventHandlers[message.optInt("id", -1)]
+            if (handler != null && message.optString("type") == "event") {
+                val event = message.optJSONObject("event")
+                // Events are only read during a request; one fired while Assist sat idle is stale.
+                if (event != null && isRecent(event.optString("time_fired"))) event.optJSONObject("data")?.let(handler)
                 continue
             }
             return message
@@ -368,6 +370,13 @@ class HaClient(baseUrl: String, private val token: String) {
      * Runs one request with a time limit. Requests take turns (one reader of the
      * connection at a time), so a log sync never interleaves with an Assist request.
      */
+    /** Whether an event fired at [timeFired] (ISO time) is under a minute old; unknown times count as recent. */
+    private fun isRecent(timeFired: String): Boolean = try {
+        java.time.OffsetDateTime.parse(timeFired).toInstant().isAfter(java.time.Instant.now().minusSeconds(60))
+    } catch (e: java.time.format.DateTimeParseException) {
+        true
+    }
+
     private suspend fun <T> timed(millis: Long, what: String, block: suspend () -> T): T = lock.withLock {
         try {
             withTimeout(millis) { block() }
@@ -377,7 +386,11 @@ class HaClient(baseUrl: String, private val token: String) {
     }
 
     companion object {
+        /** Open an app on the phone; data: package ("com.spotify.music"). Spotify only plays on a phone while its app runs. */
         const val OPEN_APP_EVENT = "assist_plus_open_app"
+
+        /** Set the phone's volume; data: level (0–100), stream ("media", "ring", "alarm" or "notification", default media). */
+        const val SET_VOLUME_EVENT = "assist_plus_set_volume"
 
         private val http = OkHttpClient.Builder()
             .pingInterval(30, TimeUnit.SECONDS)
