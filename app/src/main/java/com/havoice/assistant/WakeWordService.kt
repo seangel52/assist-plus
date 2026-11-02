@@ -62,6 +62,10 @@ class WakeWordService : Service(), SensorEventListener {
     private var lastAccel: FloatArray? = null
     private var sleeping = false
 
+    // Set when this listener opened Assist, so Assist opening otherwise means it was opened by hand.
+    private var wokeAssist = false
+    private var lastNearMissSaved = 0L
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
@@ -77,6 +81,8 @@ class WakeWordService : Service(), SensorEventListener {
                 return START_NOT_STICKY
             }
             ACTION_PAUSE -> {
+                if (listenJob?.isActive == true && !wokeAssist) openedByHand()
+                wokeAssist = false
                 stopListening()
                 updateNotification(IN_ASSIST)
                 return START_STICKY
@@ -144,7 +150,7 @@ class WakeWordService : Service(), SensorEventListener {
             var nextBatteryLog = SystemClock.elapsedRealtime() + BATTERY_LOG_MS
             AppLog.i("Wake word listening started for ${phrases.size} phrase(s) (battery ${batteryPercent()}%)")
             while (isActive) {
-                val (phrase, audio) = WakeWords.awaitWake(applicationContext, phrases, settings.wakeSensitivity) {
+                val (phrase, audio) = WakeWords.awaitWake(applicationContext, phrases, settings.wakeSensitivity, ::nearMiss) {
                     if (SystemClock.elapsedRealtime() > nextBatteryLog) {
                         nextBatteryLog += BATTERY_LOG_MS
                         AppLog.i(
@@ -168,6 +174,39 @@ class WakeWordService : Service(), SensorEventListener {
         wakeLock = null
     }
 
+    /**
+     * A wake phrase the looser spotter heard but the real one didn't: logged with its voice score
+     * and loudness. With "Save recordings" on, the clip is kept when it could be the owner (a TV
+     * that sounded like the phrase gets a log line only), at most one a minute.
+     */
+    private fun nearMiss(phrase: WakePhrase, audio: FloatArray) {
+        val (mine, score) = WakeWords.voiceMatches(applicationContext, settings, phrase, audio)
+        val line = "Wake word near miss: something like \"${phrase.text}\" (voice %s, loudest %.0f dB)"
+            .format(score?.let { "%.2f".format(it) } ?: "-", WakeWords.loudestDb(audio))
+        AppLog.i(line + if (mine) "" else " — not your voice")
+        val now = SystemClock.elapsedRealtime()
+        if (settings.saveRecordings && mine && now - lastNearMissSaved > NEAR_MISS_SAVE_GAP_MS) {
+            lastNearMissSaved = now
+            Captures.save(applicationContext, "wake_near_miss", audio, line)
+        }
+    }
+
+    /**
+     * Assist opened while this listener was listening, so not by the wake word: often right after
+     * a wake word that didn't work. With "Save recordings" on, the last 10 seconds it heard are
+     * kept, so the missed wake word can be looked at.
+     */
+    private fun openedByHand() {
+        if (!settings.saveRecordings) return
+        val audio = WakeHistory.last(10f)
+        WakeHistory.clear()
+        if (audio.isEmpty()) return
+        val line = "Assist opened by hand; the wake word listener's last %.0f s (loudest %.0f dB)"
+            .format(audio.size / MicRecorder.SAMPLE_RATE.toFloat(), WakeWords.loudestDb(audio))
+        AppLog.i(line)
+        Captures.save(applicationContext, "wake_before_opened_by_hand", audio, line)
+    }
+
     /** Whether a detection should wake Assist: phone lock and voice checks. */
     private fun accept(phrase: WakePhrase, audio: FloatArray): Boolean {
         val locked = getSystemService(KeyguardManager::class.java).isKeyguardLocked
@@ -177,13 +216,17 @@ class WakeWordService : Service(), SensorEventListener {
         }
         val (mine, score) = WakeWords.voiceMatches(applicationContext, settings, phrase, audio)
         val scoreText = score?.let { ", voice %.2f".format(it) } ?: ""
-        AppLog.i("Wake word \"${phrase.text}\" heard$scoreText${if (mine) "" else " — not your voice; ignored"}")
+        val line = "Wake word \"${phrase.text}\" heard$scoreText, loudest %.0f dB".format(WakeWords.loudestDb(audio))
+        AppLog.i(line + if (mine) "" else " — not your voice; ignored")
+        // A wake word that worked, to compare with the near misses (only with "Save recordings" on).
+        if (settings.saveRecordings && mine) Captures.save(applicationContext, "wake_heard", audio, line)
         return mine
     }
 
     /** Opens the Assist sheet, listening, and lets go of the mic until it closes. */
     private fun wake(phrase: WakePhrase) {
         stopListening()
+        wokeAssist = true
         updateNotification(IN_ASSIST)
         try {
             ToneGenerator(AudioManager.STREAM_MUSIC, 60).startTone(ToneGenerator.TONE_PROP_ACK, 150)
@@ -279,6 +322,7 @@ class WakeWordService : Service(), SensorEventListener {
         private const val ACTION_RELOAD = "reload"
         private const val ACTION_START_PAUSED = "start_paused"
         private const val BATTERY_LOG_MS = 30 * 60_000L
+        private const val NEAR_MISS_SAVE_GAP_MS = 60_000L
         private const val MOTION_BATCH_US = 10_000_000
         private const val MOVEMENT_THRESHOLD = 0.6f
 

@@ -35,9 +35,18 @@ object Captures {
         val stamp = SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date())
         val base = "${stamp}_$label"
         writeWav(File(folder, "${base}_raw.wav"), recorder.raw.toByteArray())
-        writeWav(File(folder, "${base}_clean.wav"), recorder.clean.toByteArray())
+        // Audio that never went through noise reduction (the wake word listener's) has no clean copy.
+        if (recorder.clean.size() > 0) writeWav(File(folder, "${base}_clean.wav"), recorder.clean.toByteArray())
         File(folder, "$base.txt").writeText(notes + "\n")
         prune(folder)
+    }
+
+    /** Saves audio the app already holds (like the wake word listener's last seconds) as one set. */
+    fun save(context: Context, label: String, samples: FloatArray, notes: String) {
+        val pcm = ByteBuffer.allocate(samples.size * 2).order(ByteOrder.LITTLE_ENDIAN)
+        samples.forEach { pcm.putShort((it.coerceIn(-1f, 1f) * 32767f).toInt().toShort()) }
+        val recorder = Recorder().apply { raw.write(pcm.array()) }
+        save(context, label, recorder, notes)
     }
 
     private fun prune(folder: File) {

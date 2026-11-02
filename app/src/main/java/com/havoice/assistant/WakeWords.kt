@@ -8,6 +8,7 @@ import android.media.AudioRecord
 import android.media.MediaRecorder
 import android.media.audiofx.AcousticEchoCanceler
 import android.os.Build
+import android.os.SystemClock
 import com.k2fsa.sherpa.onnx.FeatureConfig
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.isActive
@@ -70,28 +71,36 @@ object WakeWords {
      * The spotter's keyword list: "▁HE Y ▁JA R VI S :2.0 #0.25 @0/…", one entry per phrase,
      * labelled by index. [sensitivity] (0–1, 0.5 = as tuned) shifts every threshold by up to ±0.1.
      */
-    fun spec(context: Context, phrases: List<WakePhrase>, sensitivity: Float = 0.5f): String =
+    fun spec(context: Context, phrases: List<WakePhrase>, sensitivity: Float = 0.5f, looser: Float = 0f): String =
         phrases.mapIndexedNotNull { i, p ->
             val tokens = WakeTokenizer.get(context).encode(p.text)
-            val threshold = (p.threshold + (0.5f - sensitivity) * 0.2f).coerceIn(LOWEST_THRESHOLD, 0.9f)
+            val threshold = (p.threshold + (0.5f - sensitivity) * 0.2f - looser).coerceIn(LOWEST_THRESHOLD, 0.9f)
             if (tokens.isEmpty()) null else "${tokens.joinToString(" ")} :$BOOST #${"%.2f".format(java.util.Locale.US, threshold)} @$i"
         }.joinToString("/")
 
     /**
      * Listens until one of [phrases] is heard and returns it with the last 2 s of audio (to
      * check whose voice said it), or null if the model isn't available. Caller holds RECORD_AUDIO;
-     * cancel the coroutine to stop. [onTick] runs about every 40 ms.
+     * cancel the coroutine to stop. [onTick] runs about every 200 ms.
+     *
+     * With [onNearMiss], a second, looser copy of the spotter listens too: when it hears a phrase
+     * and the real one doesn't within a moment, [onNearMiss] gets the phrase and the audio around
+     * it. Those are the wake words that almost worked, for tuning from real use.
      */
     @SuppressLint("MissingPermission")
     suspend fun awaitWake(
         context: Context,
         phrases: List<WakePhrase>,
         sensitivity: Float,
+        onNearMiss: ((WakePhrase, FloatArray) -> Unit)? = null,
         onTick: () -> Unit = {},
     ): Pair<WakePhrase, FloatArray>? = withContext(Dispatchers.IO) {
         val spotter = WakeSpotter.get(context)?.spotter ?: return@withContext null
         val spec = spec(context, phrases, sensitivity)
         if (spec.isEmpty()) return@withContext null
+        val loose = onNearMiss?.let { spotter.createStream(spec(context, phrases, sensitivity, looser = NEAR_MISS_LOOSER)) }
+        var nearMiss: WakePhrase? = null
+        var nearMissAt = 0L
         val rate = MicRecorder.SAMPLE_RATE
         // A fifth of a second per read: the processor wakes 5 times a second instead of 25,
         // which matters for a listener that runs all day. Detection is no slower to notice.
@@ -114,8 +123,6 @@ object WakeWords {
         }
         val stream = spotter.createStream(spec)
         val gate = SoundGate()
-        val recent = FloatArray(rate * 2)
-        var recentPos = 0
         // Android hands a background app silence while another app has the microphone; note it in the log.
         var silenced = false
         var chunksRead = 0
@@ -140,10 +147,7 @@ object WakeWords {
                     }
                 }
                 val samples = VoiceProfile.toFloats(buffer.copyOf(read))
-                for (s in samples) {
-                    recent[recentPos] = s
-                    recentPos = (recentPos + 1) % recent.size
-                }
+                WakeHistory.add(samples)
                 // The model only runs while there's sound worth checking; a quiet room costs
                 // almost nothing (it was most of the listener's battery use).
                 for (piece in gate.offer(samples)) {
@@ -153,15 +157,35 @@ object WakeWords {
                         val label = spotter.getResult(stream).keyword
                         if (label.isNotEmpty()) {
                             val phrase = phrases.getOrNull(label.toIntOrNull() ?: -1) ?: continue
-                            return@withContext phrase to (recent.copyOfRange(recentPos, recent.size) + recent.copyOfRange(0, recentPos))
+                            return@withContext phrase to WakeHistory.last(2f)
                         }
                     }
+                    if (loose != null) {
+                        loose.acceptWaveform(piece, rate)
+                        while (spotter.isReady(loose)) {
+                            spotter.decode(loose)
+                            val label = spotter.getResult(loose).keyword
+                            if (label.isNotEmpty()) {
+                                spotter.reset(loose)
+                                if (nearMiss == null) {
+                                    nearMiss = phrases.getOrNull(label.toIntOrNull() ?: -1)
+                                    nearMissAt = SystemClock.elapsedRealtime()
+                                }
+                            }
+                        }
+                    }
+                }
+                // The real spotter had a moment to catch up; it didn't, so this one almost worked.
+                nearMiss?.takeIf { SystemClock.elapsedRealtime() - nearMissAt > NEAR_MISS_WAIT_MS }?.let { phrase ->
+                    nearMiss = null
+                    onNearMiss?.invoke(phrase, WakeHistory.last(3f))
                 }
                 soundShare = gate.share
                 onTick()
             }
             null
         } finally {
+            loose?.release()
             stream.release()
             record.stop()
             echoCanceller?.release()
@@ -193,6 +217,25 @@ object WakeWords {
 
     // About every 2 seconds (200 ms reads).
     private const val SILENCE_CHECK_CHUNKS = 10
+
+    // The near-miss spotter: this much looser than the real one, which gets this long to catch up.
+    private const val NEAR_MISS_LOOSER = 0.15f
+    private const val NEAR_MISS_WAIT_MS = 1_500L
+
+    /** How loud the loudest half second of [samples] is, in dB below full scale. */
+    fun loudestDb(samples: FloatArray): Float {
+        val half = MicRecorder.SAMPLE_RATE / 2
+        var best = 0.0
+        var start = 0
+        while (start < samples.size) {
+            val end = minOf(samples.size, start + half)
+            var sum = 0.0
+            for (i in start until end) sum += samples[i] * samples[i]
+            best = maxOf(best, sum / (end - start))
+            start += half / 2
+        }
+        return (10 * kotlin.math.log10(best + 1e-12)).toFloat()
+    }
 
     /** Share of time the current listening session ran the model (had sound), for the battery log. */
     @Volatile
@@ -349,5 +392,38 @@ class WakeTokenizer private constructor(private val scores: Map<String, Float>) 
                 if (tab <= 0) null else line.substring(0, tab) to (line.substring(tab + 1).toFloatOrNull() ?: return@mapNotNull null)
             }.toMap(),
         ).also { loaded = it }
+    }
+}
+
+/**
+ * The last 10 seconds the wake word listener heard (raw mic), so a missed wake word can be
+ * looked at afterwards: when Assist is opened by hand right after, the wake word that didn't
+ * work is in here.
+ */
+object WakeHistory {
+    private val ring = FloatArray(MicRecorder.SAMPLE_RATE * 10)
+    private var pos = 0
+    private var filled = 0
+
+    @Synchronized
+    fun add(samples: FloatArray) {
+        for (s in samples) {
+            ring[pos] = s
+            pos = (pos + 1) % ring.size
+        }
+        filled = minOf(ring.size, filled + samples.size)
+    }
+
+    /** The last [seconds] (at most 10) heard, oldest first. */
+    @Synchronized
+    fun last(seconds: Float): FloatArray {
+        val n = minOf(filled, (seconds * MicRecorder.SAMPLE_RATE).toInt())
+        return FloatArray(n) { i -> ring[(pos - n + i + ring.size) % ring.size] }
+    }
+
+    @Synchronized
+    fun clear() {
+        pos = 0
+        filled = 0
     }
 }
