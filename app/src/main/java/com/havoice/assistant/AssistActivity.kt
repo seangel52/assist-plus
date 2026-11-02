@@ -1473,11 +1473,15 @@ private fun AttachButton(onAttach: (AttachKind) -> Unit, photosAvailable: Boolea
     }
 }
 
-/** Attachments waiting to be sent, each with a thumbnail or icon and a remove button. */
+/**
+ * Attachments waiting to be sent, each with a thumbnail or icon and a remove button, and a note
+ * that they go with the next request (nothing is sent, or paid for, until then).
+ */
 @Composable
 private fun AttachmentRow(attachments: List<Attachment>, preparing: Boolean, onRemove: (Attachment) -> Unit) {
     if (attachments.isEmpty() && !preparing) return
     val colors = LocalHaColors.current
+    Column {
     Row(
         horizontalArrangement = Arrangement.spacedBy(HaDimens.Space2),
         verticalAlignment = Alignment.CenterVertically,
@@ -1524,6 +1528,21 @@ private fun AttachmentRow(attachments: List<Attachment>, preparing: Boolean, onR
         }
         if (preparing) Text("Adding…", style = HaText.BodyMedium, color = colors.textSecondary)
     }
+    if (attachments.isNotEmpty()) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.padding(bottom = HaDimens.Space2),
+        ) {
+            Icon(MdiIcons.ClockOutline, null, tint = colors.textSecondary, modifier = Modifier.size(16.dp))
+            Text(
+                "Not sent yet. Say or type what to do with " + if (attachments.size == 1) "it." else "them.",
+                style = HaText.BodyMedium,
+                color = colors.textSecondary,
+                modifier = Modifier.padding(start = HaDimens.Space1),
+            )
+        }
+    }
+    }
 }
 
 @Composable
@@ -1554,7 +1573,7 @@ private fun RowScope.AssistTextInput(
     OutlinedTextField(
         value = text,
         onValueChange = { text = it },
-        placeholder = { Text("Enter a request") },
+        placeholder = { Text(if (hasAttachments) "What should I do with it?" else "Enter a request") },
         singleLine = true,
         shape = RoundedCornerShape(HaRadius.M),
         textStyle = HaText.Body,

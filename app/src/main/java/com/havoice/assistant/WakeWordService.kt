@@ -78,7 +78,7 @@ class WakeWordService : Service(), SensorEventListener {
             }
             ACTION_PAUSE -> {
                 stopListening()
-                updateNotification("Paused while Assist is open")
+                updateNotification(IN_ASSIST)
                 return START_STICKY
             }
             ACTION_RESUME -> {
@@ -103,7 +103,7 @@ class WakeWordService : Service(), SensorEventListener {
             return START_NOT_STICKY
         }
         startMotionWatch()
-        if (intent?.action == ACTION_START_PAUSED) updateNotification("Paused while Assist is open") else startListening()
+        if (intent?.action == ACTION_START_PAUSED) updateNotification(IN_ASSIST) else startListening()
         return START_STICKY
     }
 
@@ -178,7 +178,7 @@ class WakeWordService : Service(), SensorEventListener {
     /** Opens the Assist sheet, listening, and lets go of the mic until it closes. */
     private fun wake(phrase: WakePhrase) {
         stopListening()
-        updateNotification("Paused while Assist is open")
+        updateNotification(IN_ASSIST)
         try {
             ToneGenerator(AudioManager.STREAM_MUSIC, 60).startTone(ToneGenerator.TONE_PROP_ACK, 150)
         } catch (e: RuntimeException) {
@@ -266,6 +266,8 @@ class WakeWordService : Service(), SensorEventListener {
         const val CHANNEL_ID = "wake_word"
         private const val NOTIFICATION_ID = 7
         private const val ACTION_STOP = "stop"
+        // The open Assist screen takes the mic over and listens for the wake word itself.
+        private const val IN_ASSIST = "Assist is open and listening for the wake word there"
         private const val ACTION_PAUSE = "pause"
         private const val ACTION_RESUME = "resume"
         private const val ACTION_START_PAUSED = "start_paused"

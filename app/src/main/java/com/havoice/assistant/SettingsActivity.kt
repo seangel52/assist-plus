@@ -36,7 +36,10 @@ import androidx.compose.material3.Tab
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.material3.Switch
+import androidx.compose.material3.Surface
 import androidx.compose.material3.TextButton
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -770,10 +773,21 @@ private fun SettingsScreen(
     var testing by remember { mutableStateOf(false) }
 
     var tab by rememberSaveable { mutableIntStateOf(0) }
+    var showDictionary by rememberSaveable { mutableStateOf(false) }
+    if (showDictionary) DictionaryDialog(settings) { showDictionary = false }
     Scaffold { padding ->
       Column(modifier = Modifier.fillMaxSize().padding(padding)) {
-        Column(modifier = Modifier.padding(start = 20.dp, end = 20.dp, top = 16.dp)) {
-            Text("Assist Plus", style = HaText.HeadlineMedium, color = LocalHaColors.current.textPrimary)
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.fillMaxWidth().padding(start = 20.dp, end = 8.dp, top = 16.dp),
+        ) {
+            Text(
+                "Assist Plus",
+                style = HaText.HeadlineMedium,
+                color = LocalHaColors.current.textPrimary,
+                modifier = Modifier.weight(1f),
+            )
+            TextButton(onClick = { showDictionary = true }) { Text("Dictionary") }
         }
         ScrollableTabRow(selectedTabIndex = tab, edgePadding = 12.dp) {
             SETTINGS_TABS.forEachIndexed { i, name ->
@@ -938,9 +952,6 @@ private fun SettingsScreen(
             )
 
             HorizontalDivider()
-            NamesSection(settings)
-
-            HorizontalDivider()
             VoiceIdSection(settings)
           }
           2 -> WakeWordSection(settings)
@@ -962,9 +973,35 @@ private fun SettingsScreen(
 
 private val SETTINGS_TABS = listOf("Connection", "Listening", "Wake word", "Assistant", "Advanced")
 
-/** Names the speech recognizer leans toward, and the corrections that taught it. */
+/** The dictionary: names the speech recognizer leans toward, and the corrections that taught it. */
 @Composable
-private fun NamesSection(settings: HaSettings) {
+private fun DictionaryDialog(settings: HaSettings, onClose: () -> Unit) {
+    Dialog(onDismissRequest = onClose, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(horizontal = 20.dp, vertical = 16.dp)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(14.dp),
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                    Text(
+                        "Dictionary",
+                        style = HaText.HeadlineMedium,
+                        color = LocalHaColors.current.textPrimary,
+                        modifier = Modifier.weight(1f),
+                    )
+                    TextButton(onClick = onClose) { Text("Done") }
+                }
+                DictionaryContent(settings)
+            }
+        }
+    }
+}
+
+@Composable
+private fun DictionaryContent(settings: HaSettings) {
     var names by remember { mutableStateOf(settings.listenNames) }
     var corrections by remember { mutableStateOf(NameCorrections.load(settings)) }
     Text("Names to listen for", style = MaterialTheme.typography.titleMedium)
