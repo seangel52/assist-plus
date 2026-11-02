@@ -178,7 +178,7 @@ object WakeWords {
                 // The real spotter had a moment to catch up; it didn't, so this one almost worked.
                 nearMiss?.takeIf { SystemClock.elapsedRealtime() - nearMissAt > NEAR_MISS_WAIT_MS }?.let { phrase ->
                     nearMiss = null
-                    onNearMiss?.invoke(phrase, WakeHistory.last(3f))
+                    onNearMiss?.invoke(phrase, WakeHistory.last(NEAR_MISS_CLIP_SECONDS))
                 }
                 soundShare = gate.share
                 onTick()
@@ -221,6 +221,8 @@ object WakeWords {
     // The near-miss spotter: this much looser than the real one, which gets this long to catch up.
     private const val NEAR_MISS_LOOSER = 0.15f
     private const val NEAR_MISS_WAIT_MS = 1_500L
+    // Enough to hold the whole phrase: the wait above has already passed since it ended.
+    private const val NEAR_MISS_CLIP_SECONDS = 6f
 
     /** How loud the loudest half second of [samples] is, in dB below full scale. */
     fun loudestDb(samples: FloatArray): Float {
@@ -244,15 +246,18 @@ object WakeWords {
 
     /**
      * Tunes a phrase from the owner saying it several times: picks the strictest trigger
-     * threshold that still catches all but one recording (fewer false wake-ups), and the
-     * lowest voice ID score seen (minus a margin) for the voice check.
+     * threshold that still catches every recording, close and far, then a step looser for
+     * margin, and the lowest voice ID score seen (minus a margin) for the voice check. Missing
+     * the owner is the worse mistake: the voice check already turns away the TV and others
+     * (catching all but one set the bar right at the edge of a normal voice; real use showed
+     * quieter wake phrases missed).
      * Returns the tuned phrase and how many recordings it caught.
      */
     fun tune(context: Context, phrase: String, clips: List<FloatArray>, profile: Voiceprint?, farFrom: Int = clips.size): TuneResult {
         val spotter = WakeSpotter.get(context) ?: throw HaException("Couldn't load the wake word model")
         val tokens = WakeTokenizer.get(context).encode(phrase)
         if (tokens.isEmpty()) throw HaException("Type a wake phrase first")
-        val needed = maxOf(1, clips.size - 1)
+        val needed = clips.size
         var chosen = LOWEST_THRESHOLD
         var caught = 0
         for (t in listOf(0.50f, 0.45f, 0.40f, 0.35f, 0.30f, 0.25f, 0.20f, 0.15f, 0.10f, 0.05f)) {
