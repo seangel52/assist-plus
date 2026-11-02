@@ -210,6 +210,18 @@ class AssistActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         settings = HaSettings(this)
+        val fromWakeWord = intent.getStringExtra(EXTRA_FROM_WAKE_WORD) != null &&
+            intent.getStringExtra(EXTRA_WAKE_TOKEN) == WakeWordService.LAUNCH_TOKEN
+        if (fromWakeWord && settings.inventoryMode) {
+            // The wake word always means the assistant, and switches inventory mode off.
+            settings.inventoryMode = false
+            AppLog.i("Wake word: back to assistant mode")
+        } else if (settings.inventoryMode && intent.action == Intent.ACTION_ASSIST) {
+            // Holding the side button reopens inventory mode until it's switched back.
+            startActivity(Intent(this, InventoryActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+            finish()
+            return
+        }
         // The wake word listener lets go of the mic while the sheet is open. If it isn't running
         // (stopped by an app update), it starts now and listens once the sheet closes.
         if (WakeWordService.isRunning) WakeWordService.pause(this) else WakeWordService.startPaused(this)
@@ -266,6 +278,12 @@ class AssistActivity : ComponentActivity() {
                     onChangeInput = ::changeInput,
                     onOpenSettings = {
                         startActivity(Intent(this, SettingsActivity::class.java))
+                        finish()
+                    },
+                    onOpenInventory = {
+                        // Inventory mode: the side button keeps opening the scanner until switched back.
+                        settings.inventoryMode = true
+                        startActivity(Intent(this, InventoryActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
                         finish()
                     },
                     onHide = ::finish,
@@ -1178,6 +1196,7 @@ private fun AssistSheet(
     onMicrophone: () -> Unit,
     onChangeInput: () -> Unit,
     onOpenSettings: () -> Unit,
+    onOpenInventory: () -> Unit,
     onHide: () -> Unit,
 ) {
     val colors = LocalHaColors.current
@@ -1203,6 +1222,7 @@ private fun AssistSheet(
                 currentPipeline = currentPipeline,
                 onSelectPipeline = onSelectPipeline,
                 onOpenSettings = { scope.launch { sheetState.hide() }.invokeOnCompletion { onOpenSettings() } },
+                onOpenInventory = onOpenInventory,
                 modifier = Modifier.padding(top = HaDimens.Space4),
             )
             AssistConversation(messages = messages, modifier = Modifier.weight(1f, fill = false))
@@ -1229,6 +1249,7 @@ private fun AssistSheetHeader(
     currentPipeline: Pipeline?,
     onSelectPipeline: (Pipeline) -> Unit,
     onOpenSettings: () -> Unit,
+    onOpenInventory: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val colors = LocalHaColors.current
@@ -1239,6 +1260,7 @@ private fun AssistSheetHeader(
                 PipelineSelector(pipelines, currentPipeline, onSelectPipeline)
             }
         }
+        HaIconButton(icon = MdiIcons.Barcode, contentDescription = "Inventory mode", onClick = onOpenInventory, neutral = true)
         HaIconButton(icon = MdiIcons.Cog, contentDescription = "Settings", onClick = onOpenSettings, neutral = true)
     }
 }

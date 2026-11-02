@@ -205,6 +205,20 @@ class HaClient(baseUrl: String, private val token: String) {
         }
     }
 
+    /** Runs the Home Assistant script [script] with [fields] and returns what it gives back. */
+    suspend fun runScript(script: String, fields: JSONObject, timeoutMillis: Long = 30_000): JSONObject =
+        timed(timeoutMillis, "Home Assistant's $script") {
+            val id = sendCommand(
+                JSONObject()
+                    .put("type", "call_service")
+                    .put("domain", "script")
+                    .put("service", script)
+                    .put("service_data", fields)
+                    .put("return_response", true),
+            )
+            awaitResult(id).optJSONObject("response") ?: JSONObject()
+        }
+
     /** Asks an AI Task entity to describe an uploaded image with [instructions]. */
     suspend fun describeImage(aiTaskEntity: String, mediaId: String, mimeType: String, instructions: String): String =
         timed(90_000, "the photo description") {

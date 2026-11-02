@@ -95,6 +95,24 @@ class HaSettings(context: Context) {
         get() = prefs.getFloat("end_pause_seconds", 1.2f)
         set(value) = prefs.edit().putFloat("end_pause_seconds", value).apply()
 
+    /**
+     * Inventory mode: the side button opens the inventory scanner instead of the assistant
+     * until switched back; the wake word always opens the assistant and switches back.
+     */
+    var inventoryMode: Boolean
+        get() = prefs.getBoolean("inventory_mode", false)
+        set(value) = prefs.edit().putBoolean("inventory_mode", value).apply()
+
+    /** Where scanned items go (a Grocy location's name); stays set between scans. */
+    var inventoryLocation: String
+        get() = prefs.getString("inventory_location", null) ?: "Pantry"
+        set(value) = prefs.edit().putString("inventory_location", value).apply()
+
+    /** Unknown barcodes wait in a list to be dealt with later, instead of right away. */
+    var inventoryQueueUnknowns: Boolean
+        get() = prefs.getBoolean("inventory_queue_unknowns", true)
+        set(value) = prefs.edit().putBoolean("inventory_queue_unknowns", value).apply()
+
     /** The AI Task entity that describes attached photos; found automatically when blank. */
     var aiTaskEntity: String
         get() = prefs.getString("ai_task_entity", null).orEmpty()

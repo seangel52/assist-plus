@@ -85,9 +85,13 @@ dependencies {
     implementation("com.google.android.gms:play-services-mlkit-barcode-scanning:18.3.1")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-play-services:1.9.0")
 
-    // On-device speech engine: noise removal, VoxLock voice isolation, streaming and
-    // final speech recognition, speaker ID. Release AAR from github.com/k2-fsa/sherpa-onnx.
-    // v2.0.1 is needed for VoxLock; v1.13.8 was the last version before it.
+    // Inventory mode's scanner: a live camera inside the app (barcodes read by ML Kit above).
+    implementation("androidx.camera:camera-camera2:1.4.1")
+    implementation("androidx.camera:camera-lifecycle:1.4.1")
+    implementation("androidx.camera:camera-view:1.4.1")
+
+    // On-device speech engine: noise removal, speech detection, speech recognition, speaker ID,
+    // keyword spotting. Release AAR from github.com/k2-fsa/sherpa-onnx.
     implementation(files("libs/sherpa-onnx-2.0.1.aar"))
 
     testImplementation("junit:junit:4.13.2")
