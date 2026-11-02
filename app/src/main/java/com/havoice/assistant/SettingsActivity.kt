@@ -344,8 +344,6 @@ private fun VoiceIdSection(settings: HaSettings) {
             style = MaterialTheme.typography.bodySmall,
         )
     }
-    var saveRecordings by remember { mutableStateOf(settings.saveRecordings) }
-    var savedCount by remember { mutableStateOf(Captures.count(context)) }
 
     val enroll = rememberMicAccess(onDenied = { status = "Microphone permission is needed." }) {
         scope.launch {
@@ -382,7 +380,6 @@ private fun VoiceIdSection(settings: HaSettings) {
                 }
                 AppLog.i("Voice ID set up (consistency %.2f)".format(consistency))
                 enrolled = true
-                savedCount = Captures.count(context)
                 status = "Voice saved. Now try \"Record me\" and \"Record TV/video\" a few times each."
             } catch (e: Exception) {
                 prompt = null
@@ -415,10 +412,7 @@ private fun VoiceIdSection(settings: HaSettings) {
                 val line = "Voice ID sample '$label': ${score?.let { "%.2f".format(it) } ?: "-"} vs strictness %.2f ($verdict)"
                     .format(threshold)
                 AppLog.i(line)
-                if (settings.saveRecordings) {
-                    Captures.save(context, label, capture, line)
-                    savedCount = Captures.count(context)
-                }
+                if (settings.saveRecordings) Captures.save(context, label, capture, line)
                 status = "${if (label == "me") "You" else "TV/video"}: ${score?.let { "%.2f".format(it) } ?: "-"} — $verdict " +
                     "(strictness %.2f)".format(threshold)
             } catch (e: HaException) {
@@ -458,13 +452,26 @@ private fun VoiceIdSection(settings: HaSettings) {
         ) { Text("Remove my voice") }
     }
     status?.let { Text(it, color = MaterialTheme.colorScheme.primary) }
+}
 
+/**
+ * Troubleshooting recordings: off by default, for working out why listening or the wake word
+ * misbehaves. Everything saved stays on the phone, newest 60 sets.
+ */
+@Composable
+private fun TroubleshootingSection(settings: HaSettings) {
+    val context = LocalContext.current
+    var saveRecordings by remember { mutableStateOf(settings.saveRecordings) }
+    var savedCount by remember { mutableStateOf(Captures.count(context)) }
+    Text("Troubleshooting", style = MaterialTheme.typography.titleMedium)
     Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.weight(1f)) {
-            Text("Save recordings for tuning")
+            Text("Save troubleshooting recordings")
             Text(
-                "Keeps the audio of tests and Assist sessions on this phone ($savedCount saved, oldest removed " +
-                    "automatically) so voice ID can be tuned on your real voice.",
+                "For finding out why Assist missed or misheard you. Leave off normally. While on, it keeps on " +
+                    "this phone: each Assist session, voice tests and setup, 2 s of each wake word, 6 s of each " +
+                    "wake word that almost worked (your voice only, at most one a minute), and the 10 s before " +
+                    "you open Assist by hand. $savedCount saved; the oldest are removed automatically.",
                 style = MaterialTheme.typography.bodySmall,
             )
         }
@@ -473,6 +480,7 @@ private fun VoiceIdSection(settings: HaSettings) {
             onCheckedChange = {
                 saveRecordings = it
                 settings.saveRecordings = it
+                AppLog.i("Troubleshooting recordings turned ${if (it) "on" else "off"}")
             },
         )
     }
@@ -481,10 +489,10 @@ private fun VoiceIdSection(settings: HaSettings) {
             onClick = {
                 Captures.clear(context)
                 savedCount = 0
-                AppLog.i("Saved recordings deleted")
+                AppLog.i("Troubleshooting recordings deleted")
             },
             modifier = Modifier.fillMaxWidth(),
-        ) { Text("Delete saved recordings") }
+        ) { Text("Delete troubleshooting recordings") }
     }
 }
 
@@ -993,6 +1001,8 @@ private fun SettingsScreen(
             NoiseSection(settings)
             HorizontalDivider()
             LogSection(settings)
+            HorizontalDivider()
+            TroubleshootingSection(settings)
           }
           }
         }

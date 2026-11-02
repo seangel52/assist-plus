@@ -140,7 +140,7 @@ The `[end]` tag lets the app close the assistant when the conversation is over, 
 - **Audio never leaves the phone.** Home Assistant receives text, the photos and files you choose to attach, and nothing else. Barcode numbers are looked up on Open Food Facts.
 - **Your token** is kept in the app's private storage (Android backups are disabled for the app) and only sent to your Home Assistant.
 - **The app's log** (requests, timings, voice ID scores) is copied into your own Home Assistant log under the `assist_plus` logger, so problems can be diagnosed. A spoken PIN is never logged, saved or shown.
-- **Recordings for tuning** are off by default and stay on the phone if you turn them on.
+- **Troubleshooting recordings** (Settings → Advanced) are off by default. Turned on, they keep Assist sessions and wake word clips on the phone only, to work out why it missed or misheard you.
 - **Spoken PIN** (experimental) is separate from your phone's PIN and stored only as a salted hash; three wrong tries pause it for 5 minutes. The phone itself stays locked — no app can unlock Android.
 - **Use HTTPS away from home.** Plain `http://` is allowed so local addresses work.
 - **Permissions:** microphone (listening), notifications and foreground service (wake word), display over other apps (wake word opening Assist), camera is not requested (photos use the camera app and the photo picker).

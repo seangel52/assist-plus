@@ -176,7 +176,7 @@ class WakeWordService : Service(), SensorEventListener {
 
     /**
      * A wake phrase the looser spotter heard but the real one didn't: logged with its voice score
-     * and loudness. With "Save recordings" on, the clip is kept when it could be the owner (a TV
+     * and loudness. With troubleshooting recordings on (Settings → Advanced), the clip is kept when it could be the owner (a TV
      * that sounded like the phrase gets a log line only), at most one a minute.
      */
     private fun nearMiss(phrase: WakePhrase, audio: FloatArray) {
@@ -193,8 +193,8 @@ class WakeWordService : Service(), SensorEventListener {
 
     /**
      * Assist opened while this listener was listening, so not by the wake word: often right after
-     * a wake word that didn't work. With "Save recordings" on, the last 10 seconds it heard are
-     * kept, so the missed wake word can be looked at.
+     * a wake word that didn't work. With troubleshooting recordings on, the last 10 seconds it
+     * heard are kept, so the missed wake word can be looked at.
      */
     private fun openedByHand() {
         if (!settings.saveRecordings) return
@@ -218,7 +218,7 @@ class WakeWordService : Service(), SensorEventListener {
         val scoreText = score?.let { ", voice %.2f".format(it) } ?: ""
         val line = "Wake word \"${phrase.text}\" heard$scoreText, loudest %.0f dB".format(WakeWords.loudestDb(audio))
         AppLog.i(line + if (mine) "" else " — not your voice; ignored")
-        // A wake word that worked, to compare with the near misses (only with "Save recordings" on).
+        // Troubleshooting: a wake word that worked, to compare with the near misses (recordings on).
         if (settings.saveRecordings && mine) Captures.save(applicationContext, "wake_heard", audio, line)
         return mine
     }

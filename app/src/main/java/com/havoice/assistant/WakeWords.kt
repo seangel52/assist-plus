@@ -218,10 +218,12 @@ object WakeWords {
     // About every 2 seconds (200 ms reads).
     private const val SILENCE_CHECK_CHUNKS = 10
 
-    // The near-miss spotter: this much looser than the real one, which gets this long to catch up.
+    // Troubleshooting: the near-miss spotter is this much looser than the real one, which gets
+    // this long to catch up.
     private const val NEAR_MISS_LOOSER = 0.15f
     private const val NEAR_MISS_WAIT_MS = 1_500L
-    // Enough to hold the whole phrase: the wait above has already passed since it ended.
+    // Troubleshooting clips of near misses: enough to hold the whole phrase, since the wait above
+    // has already passed when it ended.
     private const val NEAR_MISS_CLIP_SECONDS = 6f
 
     /** How loud the loudest half second of [samples] is, in dB below full scale. */

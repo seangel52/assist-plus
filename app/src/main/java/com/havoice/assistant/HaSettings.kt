@@ -85,7 +85,7 @@ class HaSettings(context: Context) {
             ?: noiseReduction
         set(value) = prefs.edit().putString("voiceprint_noise", value.name).apply()
 
-    /** Keep recordings of listening sessions and voice tests on the phone for tuning. */
+    /** Troubleshooting: keep recordings of listening sessions, voice tests and wake words on the phone (Settings → Advanced). */
     var saveRecordings: Boolean
         get() = prefs.getBoolean("save_recordings", false)
         set(value) = prefs.edit().putBoolean("save_recordings", value).apply()
