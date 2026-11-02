@@ -1104,24 +1104,34 @@ class AssistActivity : ComponentActivity() {
 
     /** Sets one of the phone's volumes to [level] percent, because a Home Assistant script asked to. */
     private fun setPhoneVolume(level: Int, stream: String) {
-        val type = when (stream.lowercase()) {
-            "ring", "ringer" -> AudioManager.STREAM_RING
-            "alarm" -> AudioManager.STREAM_ALARM
-            "notification", "notifications" -> AudioManager.STREAM_NOTIFICATION
-            else -> AudioManager.STREAM_MUSIC
+        // The volume the assistant's voice plays at (replies use USAGE_ASSISTANT): Android
+        // decides which slider that is, and some phones give it its own.
+        val assistant = AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_ASSISTANT).build().volumeControlStream
+        val types = when (stream.lowercase()) {
+            "ring", "ringer" -> listOf(AudioManager.STREAM_RING)
+            "alarm" -> listOf(AudioManager.STREAM_ALARM)
+            "notification", "notifications" -> listOf(AudioManager.STREAM_NOTIFICATION)
+            "media" -> listOf(AudioManager.STREAM_MUSIC)
+            "assistant" -> listOf(assistant)
+            // Not said which: what the phone plays out loud, media and the assistant's voice.
+            else -> listOf(AudioManager.STREAM_MUSIC, assistant).distinct()
         }
         if (level !in 0..100) {
             AppLog.w("Home Assistant asked for volume $level, which isn't 0–100")
             return
         }
-        val max = audioManager.getStreamMaxVolume(type)
-        try {
-            audioManager.setStreamVolume(type, Math.round(level / 100f * max), AudioManager.FLAG_SHOW_UI)
-            AppLog.i("Set the phone's $stream volume to $level%")
-        } catch (e: SecurityException) {
-            // Do Not Disturb keeps apps from changing the ring and notification volumes.
-            AppLog.w("Couldn't set the $stream volume: ${e.message}")
+        for (type in types) {
+            val max = audioManager.getStreamMaxVolume(type)
+            try {
+                // The volume panel shows once, for the last one set.
+                val flags = if (type == types.last()) AudioManager.FLAG_SHOW_UI else 0
+                audioManager.setStreamVolume(type, Math.round(level / 100f * max), flags)
+            } catch (e: SecurityException) {
+                // Do Not Disturb keeps apps from changing the ring and notification volumes.
+                AppLog.w("Couldn't set volume stream $type: ${e.message}")
+            }
         }
+        AppLog.i("Set the phone's $stream volume to $level% (streams ${types.joinToString()})")
     }
 
     /** Set once Home Assistant opened another app for the request; Assist then closes after replying. */

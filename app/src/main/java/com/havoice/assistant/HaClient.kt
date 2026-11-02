@@ -389,7 +389,7 @@ class HaClient(baseUrl: String, private val token: String) {
         /** Open an app on the phone; data: package ("com.spotify.music"). Spotify only plays on a phone while its app runs. */
         const val OPEN_APP_EVENT = "assist_plus_open_app"
 
-        /** Set the phone's volume; data: level (0–100), stream ("media", "ring", "alarm" or "notification", default media). */
+        /** Set the phone's volume; data: level (0–100), stream ("all" = media and assistant, the default; or "media", "assistant", "ring", "alarm", "notification"). */
         const val SET_VOLUME_EVENT = "assist_plus_set_volume"
 
         private val http = OkHttpClient.Builder()
