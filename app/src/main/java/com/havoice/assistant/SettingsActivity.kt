@@ -564,8 +564,7 @@ private fun WakeWordSection(settings: HaSettings) {
                 val takes = near + far
                 prompt = null
                 status = "Tuning…"
-                val profile = if (settings.voiceIdEnabled) VoiceProfile.load(context) else null
-                val result = withContext(Dispatchers.Default) { WakeWords.tune(context, phrase.text, takes, profile, farFrom = near.size) }
+                val result = withContext(Dispatchers.Default) { WakeWords.tune(context, phrase.text, takes, farFrom = near.size) }
                 savePhrases(phrases.toMutableList().also { it[index] = result.phrase })
                 val caught = result.near + result.far
                 val counts = "close ${result.near} of ${near.size}, across the room ${result.far} of ${far.size}"
@@ -616,7 +615,7 @@ private fun WakeWordSection(settings: HaSettings) {
             Column(modifier = Modifier.weight(1f)) {
                 Text("\"${phrase.text}\"")
                 Text(
-                    if (phrase.voiceMin != null || phrase.threshold != WakePhrase.DEFAULT_THRESHOLD) {
+                    if (phrase.tuned || phrase.threshold != WakePhrase.DEFAULT_THRESHOLD) {
                         "Tuned to your voice"
                     } else {
                         "Not recorded yet — record it for better accuracy"

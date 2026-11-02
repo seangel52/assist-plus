@@ -23,9 +23,9 @@ import org.json.JSONObject
 /**
  * A wake phrase and how it was tuned from the owner's recordings.
  * [threshold]: the spotter's trigger threshold (lower = triggers more easily).
- * [voiceMin]: the lowest voice ID score accepted for this phrase, or null if not recorded.
+ * [tuned]: set from the owner's recordings (not just typed in).
  */
-data class WakePhrase(val text: String, val threshold: Float = DEFAULT_THRESHOLD, val voiceMin: Float? = null) {
+data class WakePhrase(val text: String, val threshold: Float = DEFAULT_THRESHOLD, val tuned: Boolean = false) {
     companion object {
         const val DEFAULT_THRESHOLD = 0.25f
     }
@@ -52,7 +52,8 @@ object WakeWords {
             WakePhrase(
                 text = o.getString("text"),
                 threshold = o.optDouble("threshold", WakePhrase.DEFAULT_THRESHOLD.toDouble()).toFloat(),
-                voiceMin = if (o.has("voiceMin")) o.getDouble("voiceMin").toFloat() else null,
+                // Earlier versions marked a tuned phrase by saving a voice score with it.
+                tuned = o.optBoolean("tuned", o.has("voiceMin")),
             )
         }
     }
@@ -60,9 +61,7 @@ object WakeWords {
     fun save(settings: HaSettings, phrases: List<WakePhrase>) {
         settings.wakePhrasesJson = JSONArray(
             phrases.map { p ->
-                JSONObject().put("text", p.text).put("threshold", p.threshold.toDouble()).apply {
-                    p.voiceMin?.let { put("voiceMin", it.toDouble()) }
-                }
+                JSONObject().put("text", p.text).put("threshold", p.threshold.toDouble()).put("tuned", p.tuned)
             },
         ).toString()
     }
@@ -249,13 +248,13 @@ object WakeWords {
     /**
      * Tunes a phrase from the owner saying it several times: picks the strictest trigger
      * threshold that still catches every recording, close and far, then a step looser for
-     * margin, and the lowest voice ID score seen (minus a margin) for the voice check. Missing
+     * margin. Missing
      * the owner is the worse mistake: the voice check already turns away the TV and others
      * (catching all but one set the bar right at the edge of a normal voice; real use showed
      * quieter wake phrases missed).
      * Returns the tuned phrase and how many recordings it caught.
      */
-    fun tune(context: Context, phrase: String, clips: List<FloatArray>, profile: Voiceprint?, farFrom: Int = clips.size): TuneResult {
+    fun tune(context: Context, phrase: String, clips: List<FloatArray>, farFrom: Int = clips.size): TuneResult {
         val spotter = WakeSpotter.get(context) ?: throw HaException("Couldn't load the wake word model")
         val tokens = WakeTokenizer.get(context).encode(phrase)
         if (tokens.isEmpty()) throw HaException("Type a wake phrase first")
@@ -271,12 +270,7 @@ object WakeWords {
             }
             caught = maxOf(caught, hits)
         }
-        val voiceMin = profile?.let { owner ->
-            val engines = SpeechEngines.get(context) ?: return@let null
-            clips.mapNotNull { VoiceProfile.score(engines, owner, VoiceProfile.speechOnly(engines, VoiceProfile.asEnrolled(context, owner, it))) }
-                .minOrNull()?.let { maxOf(0.15f, it - 0.10f) }
-        }
-        val tuned = WakePhrase(phrase, threshold = maxOf(LOWEST_THRESHOLD, chosen - 0.05f), voiceMin = voiceMin)
+        val tuned = WakePhrase(phrase, threshold = maxOf(LOWEST_THRESHOLD, chosen - 0.05f), tuned = true)
         // Which takes the tuned phrase catches, close and far apart: if far ones are missed even at
         // the loosest threshold, the spotter can't hear the phrase from there.
         val spec = "${tokens.joinToString(" ")} :$BOOST #${"%.2f".format(java.util.Locale.US, tuned.threshold)} @0"
@@ -284,8 +278,8 @@ object WakeWords {
         val near = hits.take(farFrom).count { it }
         val far = hits.drop(farFrom).count { it }
         AppLog.i(
-            "Wake phrase \"$phrase\" tuned: close $near of $farFrom, far $far of ${clips.size - farFrom}, threshold %.2f, voice min %s"
-                .format(tuned.threshold, voiceMin?.let { "%.2f".format(it) } ?: "-"),
+            "Wake phrase \"$phrase\" tuned: close $near of $farFrom, far $far of ${clips.size - farFrom}, threshold %.2f"
+                .format(tuned.threshold),
         )
         return TuneResult(tuned, near, far)
     }
