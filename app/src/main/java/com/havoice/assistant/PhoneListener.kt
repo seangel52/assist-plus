@@ -172,12 +172,16 @@ class PhoneListener(
             }
         }
 
-        /** Scores audio [from, to) against the voiceprint and adds it to the timeline. */
-        private fun scoreWindow(from: Int, to: Int) {
+        /**
+         * Scores audio [from, to) against the voiceprint and adds it to the timeline. [isolated]: the
+         * window is a whole short phrase on its own (only known once it ended), which gets the
+         * short-phrase allowance; windows of a phrase still going on don't.
+         */
+        private fun scoreWindow(from: Int, to: Int, isolated: Boolean = false) {
             val owner = profile ?: return
-            if (to - from < MIN_WINDOW_SAMPLES) return
+            if (to - from < (if (isolated) MIN_PHRASE_SAMPLES else MIN_WINDOW_SAMPLES)) return
             val score = VoiceProfile.score(engines, owner, audio.copy(from, to)) ?: return
-            val needed = VoiceProfile.needed(threshold - WINDOW_SLACK, (to - from) / RATE.toFloat(), meter?.snr(from, to))
+            val needed = VoiceProfile.needed(threshold - WINDOW_SLACK, (to - from) / RATE.toFloat(), meter?.snr(from, to), isolated)
             timeline.add(from, to, score, needed)
         }
 
@@ -252,8 +256,12 @@ class PhoneListener(
         private fun handleSegment(segment: SpeechSegment) {
             val start = segment.start.toInt()
             val end = minOf(audio.size, start + segment.samples.size)
-            // Score the end of the phrase too, and a phrase too short to have been scored yet.
-            if (end - lastWindowAt > HOP_SAMPLES / 2 || phraseStart < 0) scoreWindow(maxOf(start, end - WINDOW_SAMPLES), end)
+            // Score the end of the phrase too. A phrase no longer than a window is scored whole,
+            // as a short phrase on its own.
+            val short = end - start <= WINDOW_SAMPLES
+            if (short || end - lastWindowAt > HOP_SAMPLES / 2 || phraseStart < 0) {
+                scoreWindow(maxOf(start, end - WINDOW_SAMPLES), end, isolated = short)
+            }
             phrases += judge(start, end)
             lastSpeechEnd = end
             phraseStart = -1
@@ -274,7 +282,8 @@ class PhoneListener(
             val ownerAudio = spans.map { audio.copy(it.first, it.last + 1) }.reduce { a, b -> a + b }
             val seconds = ownerAudio.size / RATE.toFloat()
             val snr = meter?.snr(spans.first().first, spans.last().last + 1)
-            val needed = VoiceProfile.needed(threshold, seconds, snr)
+            val whole = seconds * RATE >= (end - start) * WHOLE_PHRASE
+            val needed = VoiceProfile.needed(threshold, seconds, snr, isolated = whole)
             val score = VoiceProfile.score(engines, owner, ownerAudio)
             // The speech detector trims a phrase tightly, so a first or last word can sit partly
             // outside it: a stretch of the owner's speech that reaches the phrase's edge covers
@@ -285,7 +294,7 @@ class PhoneListener(
                 from until to
             }
             val kept = words.filter { w -> reach.any { w.mid in it } }
-            val part = if (seconds * RATE >= (end - start) * WHOLE_PHRASE) {
+            val part = if (whole) {
                 "you"
             } else {
                 "you %.1f–%.1fs".format((spans.first().first - start) / RATE.toFloat(), (spans.last().last + 1 - start) / RATE.toFloat())
@@ -392,12 +401,13 @@ class PhoneListener(
         /** How often the live transcript is refreshed while you talk. */
         private const val LIVE_EVERY_SAMPLES = RATE * 4 / 10
 
-        // Who is talking: a 1.5 s window of the current phrase scored every 0.4 s (0.5 s at the
-        // start of a phrase). Windows score a little lower than whole phrases, so their bar is
+        // Who is talking: a 1.5 s window of the current phrase scored every 0.4 s (from 1 s into
+        // a phrase; a shorter phrase is scored once, whole, when it ends). Windows score a little lower than whole phrases, so their bar is
         // a little lower too; the owner's part is checked as a whole at the strictness later.
         private const val HOP_SAMPLES = RATE * 4 / 10
         private const val WINDOW_SAMPLES = RATE * 3 / 2
-        private const val MIN_WINDOW_SAMPLES = RATE / 2
+        private const val MIN_WINDOW_SAMPLES = RATE
+        private const val MIN_PHRASE_SAMPLES = RATE / 4
         private const val WINDOW_SLACK = 0.05f
 
         /** A new phrase gets this long to be checked before the owner counts as having stopped. */

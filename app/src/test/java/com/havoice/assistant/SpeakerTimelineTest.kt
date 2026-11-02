@@ -103,6 +103,9 @@ class SpeakerTimelineTest {
         assertEquals(VoiceProfile.FLOOR, VoiceProfile.needed(0.28f, 3f, 0f), 0.001f)
         // Unknown background: no allowance.
         assertEquals(0.45f, VoiceProfile.needed(0.45f, 3f, null), 0.001f)
+        // A short sliver of a longer phrase someone else fills gets no short-phrase allowance.
+        assertEquals(0.45f, VoiceProfile.needed(0.45f, 0.8f, 30f, isolated = false), 0.001f)
+        assertEquals(0.39f, VoiceProfile.needed(0.45f, 0.8f, 6f, isolated = false), 0.001f)
     }
 
     @Test

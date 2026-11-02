@@ -28,6 +28,9 @@ object VoiceProfile {
      */
     const val FLOOR = 0.25f
 
+    /** How much less a match with the far (across the room) voiceprint counts; see [score]. */
+    const val FAR_MARGIN = 0.15f
+
     // Short phrases ("yes", "no thanks") are too little speech for a firm voice check. The bar
     // drops from the strictness (at 1.5 s of speech or more) to the floor (at 0.6 s or less).
     private const val FULL_SECONDS = 1.5f
@@ -52,8 +55,10 @@ object VoiceProfile {
      * [speechSeconds] of speech, and the speech's level above the background ([snrDb], null
      * when unknown).
      */
-    fun needed(base: Float, speechSeconds: Float, snrDb: Float?): Float {
-        val shortness = ((FULL_SECONDS - speechSeconds) / (FULL_SECONDS - SHORT_SECONDS)).coerceIn(0f, 1f)
+    fun needed(base: Float, speechSeconds: Float, snrDb: Float?, isolated: Boolean = true): Float {
+        // Only a short phrase on its own gets the short-phrase allowance: a sliver of a longer
+        // phrase that another voice fills (a TV talking on) did pass as the owner with it.
+        val shortness = if (!isolated) 0f else ((FULL_SECONDS - speechSeconds) / (FULL_SECONDS - SHORT_SECONDS)).coerceIn(0f, 1f)
         val noisiness = snrDb?.let { ((CLEAN_SNR_DB - it) / (CLEAN_SNR_DB - NOISY_SNR_DB)).coerceIn(0f, 1f) } ?: 0f
         val bar = base - shortness * (base - FLOOR).coerceAtLeast(0f) - noisiness * NOISE_RELIEF
         return maxOf(FLOOR, bar)
@@ -130,9 +135,17 @@ object VoiceProfile {
     private fun average(embeddings: List<FloatArray>) =
         normalize(FloatArray(embeddings[0].size) { i -> embeddings.sumOf { it[i].toDouble() }.toFloat() })
 
-    /** Similarity (−1…1) between a phrase and the closest version of the owner's voice. */
+    /**
+     * Similarity (−1…1) between a phrase and the owner's voice: the best of the close and far
+     * versions, the far one less [FAR_MARGIN]. Any voice heard from across the room (a TV
+     * included) sounds more like the far version: measured on the owner's phone, TV audio
+     * scored up to 0.32 against it in 1.5 s pieces, against at most 0.10 for the close one, while
+     * the owner across the room scored 0.42 against it (0.19 against the close one).
+     */
     fun score(engines: SpeechEngines, profile: Voiceprint, samples: FloatArray): Float? =
-        embed(engines, samples)?.let { e -> profile.centroids.maxOf { cosine(e, it) } }
+        embed(engines, samples)?.let { e ->
+            profile.centroids.mapIndexed { i, c -> cosine(e, c) - if (i == 0) 0f else FAR_MARGIN }.max()
+        }
 
     /**
      * Raw microphone audio put through the same noise reduction as the setup recordings, so it
