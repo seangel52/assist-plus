@@ -57,6 +57,10 @@ class HaClient(baseUrl: String, private val token: String) {
     private var nextId = 1
     private val lock = Mutex()
 
+    // Home Assistant asking this phone to open an app (event "assist_plus_open_app"), see [onOpenApp].
+    private var openAppSubscription = -1
+    private var openAppHandler: ((String) -> Unit)? = null
+
     suspend fun connect() {
         val request = try {
             Request.Builder().url(wsUrl).build()
@@ -89,6 +93,18 @@ class HaClient(baseUrl: String, private val token: String) {
                 else -> throw HaException("Unexpected reply while logging in: $type")
             }
         }
+    }
+
+    /**
+     * Lets Home Assistant open an app on this phone while Assist is open: a script fires the
+     * event "assist_plus_open_app" with the app's package ("com.spotify.music"), and [handler]
+     * gets the package. Spotify, for one, only plays on a phone while its app is running.
+     */
+    suspend fun onOpenApp(handler: (String) -> Unit) = timed(10_000, "Home Assistant to accept the subscription") {
+        openAppHandler = handler
+        val id = sendCommand(JSONObject().put("type", "subscribe_events").put("event_type", OPEN_APP_EVENT))
+        awaitResult(id)
+        openAppSubscription = id
     }
 
     suspend fun listPipelines(): PipelineList = timed(10_000, "the pipeline list") {
@@ -329,10 +345,23 @@ class HaClient(baseUrl: String, private val token: String) {
     private fun absoluteUrl(url: String): String =
         if ("://" in url) httpBase + "/" + url.substringAfter("://").substringAfter('/', "") else httpBase + url
 
-    private suspend fun receive(): JSONObject = try {
-        incoming.receive()
-    } catch (e: ClosedReceiveChannelException) {
-        throw HaException("Home Assistant closed the connection")
+    /**
+     * The next message for the request in progress. An "open an app" event can arrive in the
+     * middle of any request (a script fires it while the agent works); it's handled here.
+     */
+    private suspend fun receive(): JSONObject {
+        while (true) {
+            val message = try {
+                incoming.receive()
+            } catch (e: ClosedReceiveChannelException) {
+                throw HaException("Home Assistant closed the connection")
+            }
+            if (openAppSubscription >= 0 && message.optInt("id") == openAppSubscription && message.optString("type") == "event") {
+                message.optJSONObject("event")?.optJSONObject("data")?.optStringOrNull("package")?.let { openAppHandler?.invoke(it) }
+                continue
+            }
+            return message
+        }
     }
 
     /**
@@ -348,6 +377,8 @@ class HaClient(baseUrl: String, private val token: String) {
     }
 
     companion object {
+        const val OPEN_APP_EVENT = "assist_plus_open_app"
+
         private val http = OkHttpClient.Builder()
             .pingInterval(30, TimeUnit.SECONDS)
             .build()

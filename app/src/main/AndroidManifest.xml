@@ -23,6 +23,11 @@
     <queries>
         <package android:name="com.google.android.apps.maps" />
         <package android:name="com.waze" />
+        <!-- Apps Home Assistant may ask Assist to open (Spotify before it plays on this phone). -->
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LAUNCHER" />
+        </intent>
     </queries>
 
     <application

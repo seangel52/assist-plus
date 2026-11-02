@@ -653,7 +653,7 @@ class AssistActivity : ComponentActivity() {
                 }
                 conversationId = reply.conversationId
                 val (shown, agentEnded) = ExitWords.stripEndTag(learnNames(reply.speech))
-                closing = agentEnded || exit == ExitWords.Kind.GOODBYE
+                closing = agentEnded || exit == ExitWords.Kind.GOODBYE || openedOtherApp
                 AppLog.i("Typed ${quote(text)} → reply in ${System.currentTimeMillis() - started} ms: ${quote(shown)}")
                 AssistMessage(shown.ifBlank { "Done." }, isInput = false)
             } catch (e: HaException) {
@@ -968,7 +968,7 @@ class AssistActivity : ComponentActivity() {
                 }
                 conversationId = reply.conversationId
                 val (spoken, agentEnded) = ExitWords.stripEndTag(learnNames(reply.speech))
-                val closing = agentEnded || exit == ExitWords.Kind.GOODBYE
+                val closing = agentEnded || exit == ExitWords.Kind.GOODBYE || openedOtherApp
                 AppLog.i(
                     "Voice (noise $noise): sent ${quote(text)} at ${heardAt} ms " +
                         "(ended by ${command.endReason}), " +
@@ -1090,7 +1090,31 @@ class AssistActivity : ComponentActivity() {
                 dropConnection()
                 throw e
             }
+            try {
+                it.onOpenApp { app -> runOnUiThread { openAppForAssistant(app) } }
+            } catch (e: HaException) {
+                AppLog.w("Home Assistant won't let Assist open apps: ${e.message}")
+            }
         }
+
+    /** Set once Home Assistant opened another app for the request; Assist then closes after replying. */
+    private var openedOtherApp = false
+
+    /**
+     * Opens [app] (a package name) because a Home Assistant script asked to, like Spotify before
+     * it plays on this phone. The sheet stays alive behind it to speak the reply, then closes.
+     */
+    private fun openAppForAssistant(app: String) {
+        val launch = packageManager.getLaunchIntentForPackage(app)
+        if (launch == null) {
+            AppLog.w("Home Assistant asked to open $app, which isn't installed")
+            return
+        }
+        AppLog.i("Opening $app for Home Assistant")
+        usingOtherScreen = true
+        openedOtherApp = true
+        startActivity(launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+    }
 
     /** Forgets a failed connection so the next request reconnects. */
     private fun dropConnection() {
