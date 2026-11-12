@@ -21,8 +21,6 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.core.content.FileProvider
 import androidx.core.content.IntentCompat
-import com.google.mlkit.common.MlKitException
-import com.google.mlkit.vision.codescanner.GmsBarcodeScanning
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import java.io.File
@@ -182,6 +180,11 @@ class AssistActivity : ComponentActivity() {
         usingOtherScreen = false
         uri?.let(::attachUri)
     }
+    private val scanBarcode = registerForActivityResult(ScanBarcodeActivity.Contract()) { code ->
+        usingOtherScreen = false
+        if (code == null) AppLog.i("Barcode scanner closed without a scan")
+        else prepare { listOf(Attachment.Barcode(Attachments.scanned(code))) }
+    }
 
     private val audioManager by lazy { getSystemService(AudioManager::class.java) }
 
@@ -210,6 +213,18 @@ class AssistActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         settings = HaSettings(this)
+        val fromWakeWord = intent.getStringExtra(EXTRA_FROM_WAKE_WORD) != null &&
+            intent.getStringExtra(EXTRA_WAKE_TOKEN) == WakeWordService.LAUNCH_TOKEN
+        if (fromWakeWord && settings.inventoryMode) {
+            // The wake word always means the assistant, and switches inventory mode off.
+            settings.inventoryMode = false
+            AppLog.i("Wake word: back to assistant mode")
+        } else if (settings.inventoryMode && intent.action == Intent.ACTION_ASSIST) {
+            // Holding the side button reopens inventory mode until it's switched back.
+            startActivity(Intent(this, InventoryActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+            finish()
+            return
+        }
         // The wake word listener lets go of the mic while the sheet is open. If it isn't running
         // (stopped by an app update), it starts now and listens once the sheet closes.
         if (WakeWordService.isRunning) WakeWordService.pause(this) else WakeWordService.startPaused(this)
@@ -268,6 +283,12 @@ class AssistActivity : ComponentActivity() {
                         startActivity(Intent(this, SettingsActivity::class.java))
                         finish()
                     },
+                    onOpenInventory = {
+                        // Inventory mode: the side button keeps opening the scanner until switched back.
+                        settings.inventoryMode = true
+                        startActivity(Intent(this, InventoryActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                        finish()
+                    },
                     onHide = ::finish,
                 )
             }
@@ -312,23 +333,7 @@ class AssistActivity : ComponentActivity() {
             }
             AttachKind.PHOTO -> pickPhoto.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
             AttachKind.FILE -> pickFile.launch(arrayOf("image/*", "application/pdf", "text/*", "application/json"))
-            AttachKind.BARCODE -> GmsBarcodeScanning.getClient(this).startScan()
-                .addOnSuccessListener { barcode ->
-                    usingOtherScreen = false
-                    barcode.rawValue?.let { value -> prepare { listOf(Attachment.Barcode(Attachments.scanned(value))) } }
-                }
-                .addOnCanceledListener { usingOtherScreen = false }
-                .addOnFailureListener { e ->
-                    usingOtherScreen = false
-                    // Backing out of the scanner arrives as a failure ("Failed to scan code").
-                    val code = (e as? MlKitException)?.errorCode
-                    if (code == MlKitException.CANCELLED || code == MlKitException.CODE_SCANNER_CANCELLED) {
-                        AppLog.i("Barcode scanner closed without a scan")
-                    } else {
-                        AppLog.w("Barcode scanner failed ($code): ${e.message}")
-                        messages += AssistMessage("Barcode scanner: ${e.message}", isInput = false, isError = true)
-                    }
-                }
+            AttachKind.BARCODE -> scanBarcode.launch(Unit)
         }
     }
 
@@ -401,10 +406,39 @@ class AssistActivity : ComponentActivity() {
     /** What the owner's bubble shows: their words, plus what was attached. */
     /** Takes the agent's "[heard: X -> Y]" tags out of [reply] and adds those names to listen for. */
     private fun learnNames(reply: String): String {
-        val (clean, learned) = NameCorrections.strip(reply)
-        NameCorrections.record(settings, learned)
+        val (clean, tagged) = NameCorrections.strip(reply)
+        if (tagged.isNotEmpty()) {
+            // The agent's tag is its claim, not the user's: it counts as one sighting in the
+            // user's last request, like a finding from the review.
+            val lastSaid = messages.lastOrNull { it.isInput && !it.isPlaceholder }?.message.orEmpty()
+            NameCorrections.record(settings, tagged.map { NameCorrections.Finding(it, listOf(lastSaid), userSaidMeant = false) })
+        }
         return clean
     }
+
+    /**
+     * In the background, reads the conversation so far for words the recognizer got wrong, so
+     * they're understood next time and listened for. Doesn't hold up the reply; a failure only
+     * means nothing was learned this turn.
+     */
+    private fun reviewHeard() {
+        val turns = messages.filter { !it.isPlaceholder && !it.isError && it.message != WELCOME && it.message.isNotBlank() }
+            .takeLast(HeardReview.TURNS).map { HeardReview.Turn(it.isInput, it.message) }
+        if (turns.none { it.fromUser }) return
+        lifecycleScope.launch {
+            try {
+                val entity = aiTaskEntity() ?: return@launch
+                val reply = connectedClient().askAiTask(entity, "Find misheard words for Assist", HeardReview.instructions(turns))
+                NameCorrections.record(settings, HeardReview.findings(reply.orEmpty(), turns))
+                syncLog()
+            } catch (e: HaException) {
+                AppLog.w("Couldn't review the conversation for misheard words: ${e.message}")
+            }
+        }
+    }
+
+    /** What's known about [request]'s words from past mishearings (a hidden note), or nothing. */
+    private fun recallNote(request: String) = NameCorrections.recallNote(NameCorrections.load(settings), request)
 
     /** The hidden location note for a request (Settings → Assistant), or nothing. */
     private suspend fun locationNote(): String {
@@ -647,7 +681,7 @@ class AssistActivity : ComponentActivity() {
         lifecycleScope.launch {
             var closing = false
             val answer = try {
-                val message = withAttachments(text) + locationNote()
+                val message = withAttachments(text) + recallNote(text) + locationNote()
                 val reply = connectedClient().runIntent(message, conversationId, currentPipeline, speak = false) { status ->
                     showStatus(replyIndex, status)
                 }
@@ -665,6 +699,7 @@ class AssistActivity : ComponentActivity() {
             }
             setMessage(replyIndex, answer)
             syncLog()
+            if (!answer.isError) reviewHeard()
             if (closing) {
                 // Leave the sign-off on screen for a moment before closing.
                 kotlinx.coroutines.delay(1500)
@@ -960,7 +995,7 @@ class AssistActivity : ComponentActivity() {
                 messages += AssistMessage("", isInput = false, isPlaceholder = true)
                 replyIndex = messages.lastIndex
 
-                val message = withAttachments(text) + locationNote()
+                val message = withAttachments(text) + recallNote(text) + locationNote()
                 // The reply is spoken by the app (in the pipeline's voice) rather than by the
                 // pipeline, so the agent's "[end]" tag can be taken out first.
                 val reply = connectedClient().runIntent(message, conversationId, pipeline, speak = false) { status ->
@@ -978,6 +1013,7 @@ class AssistActivity : ComponentActivity() {
                 )
                 setMessage(replyIndex, AssistMessage(spoken.ifBlank { "Done." }, isInput = false))
                 syncLog()
+                reviewHeard()
                 val interrupted = pipeline.supportsSpeech && spoken.isNotBlank() && say(spoken)
                 if (interrupted) return@launch
                 if (closing) {
@@ -1178,6 +1214,7 @@ private fun AssistSheet(
     onMicrophone: () -> Unit,
     onChangeInput: () -> Unit,
     onOpenSettings: () -> Unit,
+    onOpenInventory: () -> Unit,
     onHide: () -> Unit,
 ) {
     val colors = LocalHaColors.current
@@ -1203,6 +1240,7 @@ private fun AssistSheet(
                 currentPipeline = currentPipeline,
                 onSelectPipeline = onSelectPipeline,
                 onOpenSettings = { scope.launch { sheetState.hide() }.invokeOnCompletion { onOpenSettings() } },
+                onOpenInventory = onOpenInventory,
                 modifier = Modifier.padding(top = HaDimens.Space4),
             )
             AssistConversation(messages = messages, modifier = Modifier.weight(1f, fill = false))
@@ -1229,6 +1267,7 @@ private fun AssistSheetHeader(
     currentPipeline: Pipeline?,
     onSelectPipeline: (Pipeline) -> Unit,
     onOpenSettings: () -> Unit,
+    onOpenInventory: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val colors = LocalHaColors.current
@@ -1239,6 +1278,7 @@ private fun AssistSheetHeader(
                 PipelineSelector(pipelines, currentPipeline, onSelectPipeline)
             }
         }
+        HaIconButton(icon = MdiIcons.Barcode, contentDescription = "Inventory mode", onClick = onOpenInventory, neutral = true)
         HaIconButton(icon = MdiIcons.Cog, contentDescription = "Settings", onClick = onOpenSettings, neutral = true)
     }
 }

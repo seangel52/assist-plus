@@ -108,7 +108,10 @@ class PhoneListener(
         val accepted: Boolean,
         val how: String,
         val text: String,
-    )
+    ) {
+        /** The live words on screen for this phrase just before it ended, for comparing with [text] in the log. */
+        var shown: String = ""
+    }
 
     private inner class Session(
         private val engines: SpeechEngines,
@@ -262,7 +265,13 @@ class PhoneListener(
             if (short || end - lastWindowAt > HOP_SAMPLES / 2 || phraseStart < 0) {
                 scoreWindow(maxOf(start, end - WINDOW_SAMPLES), end, isolated = short)
             }
-            phrases += judge(start, end)
+            // While the phrase was going on, its first words were only ever judged by short
+            // windows (0.5 s, 0.9 s…) that also held the silence before it, and those score low.
+            // Now that it's over, give its start one full window from the first word, so the
+            // start is judged on as much audio as the rest.
+            if (!short) scoreWindow(start, start + WINDOW_SAMPLES)
+            val shownBefore = partial
+            phrases += judge(start, end).also { it.shown = shownBefore }
             lastSpeechEnd = end
             phraseStart = -1
             partial = ""
@@ -274,10 +283,28 @@ class PhoneListener(
          * owner talking, accepted if that part of the audio as a whole matches the voiceprint.
          */
         private fun judge(start: Int, end: Int): Phrase {
+            val verdict = judgeAlone(start, end)
+            if (verdict.accepted) return verdict
+            // The speech detector splits a sentence at tiny pauses ("I ate half of a Lean." /
+            // "Burger."), and a piece under a second and a half is too little audio to tell a voice
+            // by: it scores low or can't be scored at all. Right after the owner's own words, with
+            // no sign of another voice in it, it's the owner going on.
+            val previous = phrases.lastOrNull()
+            val continues = previous != null && previous.accepted && start - previous.end <= CONTINUE_GAP_SAMPLES
+            val brief = end - start <= WINDOW_SAMPLES
+            val notOther = verdict.score == null || verdict.score > SpeakerTimeline.OTHER_MAX
+            if (continues && brief && notOther) {
+                val text = transcribe(start, end).joinToString(" ") { it.text }
+                if (text.isNotBlank()) return Phrase(start, end, verdict.score, true, "you, continuing (${verdict.how})", text)
+            }
+            return verdict
+        }
+
+        private fun judgeAlone(start: Int, end: Int): Phrase {
             val words = transcribe(start, end)
             val all = words.joinToString(" ") { it.text }
             val owner = profile ?: return Phrase(start, end, null, true, "kept", all)
-            val spans = timeline.ownerSpans(start, end)
+            val spans = timeline.ownerSpans(start, end, closedEnd = true)
             if (spans.isEmpty()) return Phrase(start, end, timeline.meanScore(start, end), false, "other", all)
             val ownerAudio = spans.map { audio.copy(it.first, it.last + 1) }.reduce { a, b -> a + b }
             val seconds = ownerAudio.size / RATE.toFloat()
@@ -364,10 +391,13 @@ class PhoneListener(
                 AppLog.i("Heard on phone, $line")
                 return line
             }
-            val details = heardSegments().joinToString("; ") { s ->
+            fun plain(s: String) = s.lowercase().replace(Regex("[^a-z0-9' ]"), "").replace(Regex(" +"), " ").trim()
+            val details = heardSegments().zip(phrases).joinToString("; ") { (s, p) ->
                 val verdict = (if (s.accepted) "KEPT " else "DROPPED ") +
                     (s.score?.let { "%.2f ".format(it) } ?: "") + s.how
-                "%.1fs+%.1fs %s \"%s\"".format(s.startSeconds, s.seconds, verdict, s.preview.take(80))
+                // What the screen showed for this phrase just before it ended, when that differs.
+                val shown = if (p.shown.isNotBlank() && plain(p.shown) != plain(p.text)) " shown \"${p.shown.take(80)}\"" else ""
+                "%.1fs+%.1fs %s \"%s\"%s".format(s.startSeconds, s.seconds, verdict, s.preview.take(80), shown)
             }
             val outcome = command?.let { "final \"${it.text.take(200)}\"" } ?: "nothing accepted"
             val line = "ended by ${endReason ?: "mic-ended"}: $outcome | strictness %.2f | segments: %s"
@@ -418,6 +448,9 @@ class PhoneListener(
         private const val WHOLE_PHRASE = 0.9f
 
         private const val MAX_HALF_WORD_SAMPLES = RATE / 4
+
+        /** A brief piece starting this soon after the owner's accepted words counts as them going on (see judge). */
+        private const val CONTINUE_GAP_SAMPLES = RATE * 8 / 10
 
         /** Extra wait when the last words don't sound like a finished sentence. */
         private const val UNFINISHED_EXTRA_SAMPLES = RATE

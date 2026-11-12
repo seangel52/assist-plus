@@ -26,7 +26,7 @@ I built this with Claude because I wanted the Assist experience to work for my f
 - **Phone actions.** "Take me to Target on Main Street" and "set a timer for 10 minutes" are done right on the phone in Google Maps (or Waze) and your clock app. Addresses are checked first, so a misheard house number becomes a "Did you mean…?" instead of a wrong turn. Everything else goes to Home Assistant.
 - **Music and podcasts through Home Assistant.** With [SpotifyPlus](#music-spotify) on the server, "play Dare You by Papadosio", "play the newest Good Hang", "next song", "what's playing" and "add this song to Road Trip" work on your phone or any speaker in the house — even on mobile data.
 - **Home Assistant can act on the phone.** While Assist is open, scripts can set the phone's volume or open an app on it ([`docs/home-assistant/phone-scripts.yaml`](docs/home-assistant/phone-scripts.yaml)).
-- **Photos, files and barcodes.** Snap a barcode and say "I had one serving of this"; send a photo and say "remember this wine". The phone reads barcodes itself and looks them up in Open Food Facts; photos are described by your Home Assistant AI Task.
+- **Photos, files and barcodes.** Snap a barcode and say "I had one serving of this"; send a photo and say "remember this wine". The phone reads barcodes itself and shows the product's name from Open Food Facts; only the digits go to your agent, for its own tools to look up. Photos are described by your Home Assistant AI Task.
 - **Looks like Home Assistant.** The Assist sheet copies the Companion app's design, and it uses your existing pipelines, agents and voices.
 
 ## How it works

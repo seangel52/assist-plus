@@ -7,8 +7,9 @@ import java.util.Locale
 /**
  * Home Assistant's conversation agents only take text, so attachments are turned into text on
  * the way: photos are saved to HA's media folder and described by an AI Task, barcodes are
- * read on the phone and looked up, and text files are included as-is. The result is the
- * owner's request followed by one bracketed note per attachment.
+ * read on the phone and sent as digits for the agent's food tools to identify exactly (a name
+ * guessed here is what it would otherwise trust), and text files are included as-is. The result
+ * is the owner's request followed by one bracketed note per attachment.
  */
 object AttachmentMessage {
     suspend fun build(
@@ -21,7 +22,7 @@ object AttachmentMessage {
         val notes = attachments.mapIndexed { i, attachment ->
             when (attachment) {
                 is Attachment.Photo -> photoNote(request, attachment, client, aiTaskEntity, "assist_${stamp}_${i + 1}.jpg")
-                is Attachment.Barcode -> "[Scanned barcode ${codeText(attachment.code)}]"
+                is Attachment.Barcode -> "[Scanned barcode ${attachment.code.value}: these digits identify the exact product.]"
                 is Attachment.TextFile -> "[Attached file \"${attachment.name}\":\n${attachment.text}\n]"
             }
         }
@@ -44,12 +45,9 @@ object AttachmentMessage {
             "(couldn't be described: ${e.message})"
         }
         val codes = if (photo.barcodes.isEmpty()) "" else
-            " Barcodes read from the photo: " + photo.barcodes.joinToString("; ") { codeText(it) } + "."
+            " Barcodes read from the photo: " + photo.barcodes.joinToString("; ") { it.value } + "."
         return "[Attached photo \"${photo.label}\", saved in Home Assistant media as $mediaId. What it shows: $description$codes]"
     }
-
-    private fun codeText(code: ScannedCode) =
-        code.value + (code.product?.let { " — Open Food Facts: $it" } ?: " — not found in Open Food Facts")
 
     private fun instructions(request: String) =
         "The user sent this image to their home voice assistant" +

@@ -4,6 +4,9 @@
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <!-- Inventory mode's barcode scanner (a live camera inside the app). -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
 
     <!-- Wake word: listening in the background with a notification, opening Assist over
          other apps, and offering to restart listening after the phone reboots. -->
@@ -76,13 +79,23 @@
             </intent-filter>
         </activity>
 
-        <!-- Google's barcode scanner opens as a new task; in the sheet's task it stacks on top of
-             the sheet and closing it returns there (not to Settings, the app's main task). -->
+        <!-- Inventory mode: scans barcodes one after another. The camera stays up across rotation
+             (the screen isn't recreated), and the side button reopens it until switched back. -->
         <activity
-            android:name="com.google.mlkit.vision.codescanner.internal.GmsBarcodeScanningDelegateActivity"
+            android:name=".InventoryActivity"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden"
+            android:exported="false"
+            android:launchMode="singleTask"
             android:taskAffinity="com.havoice.assistant.sheet"
-            android:excludeFromRecents="true"
-            tools:node="merge" />
+            android:windowSoftInputMode="adjustResize" />
+
+        <!-- The paperclip's barcode scanner: in the sheet's task it stacks on top of the sheet
+             and closing it returns there (not to Settings, the app's main task). -->
+        <activity
+            android:name=".ScanBarcodeActivity"
+            android:exported="false"
+            android:taskAffinity="com.havoice.assistant.sheet"
+            android:excludeFromRecents="true" />
 
         <service
             android:name=".WakeWordService"

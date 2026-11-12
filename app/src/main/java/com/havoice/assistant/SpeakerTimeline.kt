@@ -59,8 +59,15 @@ class SpeakerTimeline(private val slice: Int) {
      * The owner's speech within [from, to): owner slices, plus unsure ones that are the owner
      * talking over another voice: between two owner stretches, or right next to one with a
      * score that still has the owner in it.
+     *
+     * A cut needs evidence of someone else. An unsure stretch that runs from the owner's speech
+     * to the start of the range (or to its end, when [closedEnd]: the phrase is over) has no
+     * other voice beyond it: that's the owner's first or last words, judged on too little audio
+     * (the first windows of a phrase are short and partly silence), so it's kept whole. Where
+     * another voice does sit beyond it, only the part that still sounds like the owner is kept.
+     * The open end of a phrase still in progress is left out: the next windows will tell.
      */
-    fun ownerSpans(from: Int, to: Int): List<IntRange> {
+    fun ownerSpans(from: Int, to: Int, closedEnd: Boolean = false): List<IntRange> {
         if (to <= from) return emptyList()
         val first = from / slice
         val last = (to - 1) / slice
@@ -76,8 +83,13 @@ class SpeakerTimeline(private val slice: Int) {
             while (j < labels.size && labels[j] == Speaker.UNSURE) j++
             val ownerBefore = i > 0 && labels[i - 1] == Speaker.OWNER
             val ownerAfter = j < labels.size && labels[j] == Speaker.OWNER
+            // Nothing scored beyond the run (the range's edge, or silence): no other voice there.
+            val openStart = i == 0 || labels[i - 1] == null
+            val openEnd = (j == labels.size && closedEnd) || (j < labels.size && labels[j] == null)
             when {
                 ownerBefore && ownerAfter -> for (k in i until j) keep[k] = true
+                ownerAfter && openStart -> for (k in i until j) keep[k] = true
+                ownerBefore && openEnd -> for (k in i until j) keep[k] = true
                 ownerBefore -> {
                     var k = i
                     while (k < j && (scoreOf(first + k) ?: 0.0) >= MIXED_KEEP) keep[k++] = true
