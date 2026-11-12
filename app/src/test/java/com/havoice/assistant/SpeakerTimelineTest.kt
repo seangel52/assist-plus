@@ -83,6 +83,39 @@ class SpeakerTimelineTest {
     }
 
     @Test
+    fun firstWordsJudgedOnTooLittleAudioAreKept() {
+        // Seen in the log: "[When] was the last day I logged my treadmill time?" kept only from
+        // 0.5 s. The first windows of a phrase are short and partly silence, so they score in the
+        // unsure band; no other voice was there, so nothing should be cut.
+        val t = timeline(3f) { end -> if (end < 1.3f) 0.3f else 0.55f }
+        val spans = t.ownerSpans(0, 3 * rate, closedEnd = true)
+        assertEquals(1, spans.size)
+        assertEquals(0f, seconds(spans[0]).first, 0.01f)
+    }
+
+    @Test
+    fun lastWordsOfAFinishedPhraseAreKeptWhenNoOneElseFollows() {
+        // "Play Rainbow Road playlist on [Spotify]" lost its end the same way.
+        val t = timeline(3f) { end -> if (end > 2.5f) 0.3f else 0.55f }
+        val finished = t.ownerSpans(0, 3 * rate, closedEnd = true)
+        assertEquals(3f, seconds(finished.last()).second, 0.01f)
+    }
+
+    @Test
+    fun unsureStartBeforeTheOwnerIsStillCutWhenAnotherVoiceIsThere() {
+        // TV clearly first (0.1), a mixed moment, then the owner: the TV part stays out.
+        val t = timeline(7f) { end ->
+            when {
+                end < 3f -> 0.1f
+                end < 3.8f -> 0.25f
+                else -> 0.6f
+            }
+        }
+        val start = seconds(t.ownerSpans(0, 7 * rate, closedEnd = true).first()).first
+        assertTrue("owner starts after the TV, got $start", start >= 2.4f)
+    }
+
+    @Test
     fun silenceSplitsStretches() {
         val t = SpeakerTimeline(hop)
         t.add(0, rate, 0.6f, 0.4f)

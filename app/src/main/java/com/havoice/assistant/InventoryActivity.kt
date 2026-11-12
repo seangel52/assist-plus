@@ -11,13 +11,6 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.annotation.OptIn
-import androidx.camera.core.CameraSelector
-import androidx.camera.core.ExperimentalGetImage
-import androidx.camera.core.ImageAnalysis
-import androidx.camera.core.Preview
-import androidx.camera.lifecycle.ProcessCameraProvider
-import androidx.camera.view.PreviewView
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -51,7 +44,6 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -63,21 +55,13 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
-import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.lifecycle.lifecycleScope
-import com.google.mlkit.vision.barcode.BarcodeScannerOptions
-import com.google.mlkit.vision.barcode.BarcodeScanning
-import com.google.mlkit.vision.barcode.common.Barcode
-import com.google.mlkit.vision.common.InputImage
-import java.util.concurrent.Executors
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -195,7 +179,7 @@ class InventoryActivity : ComponentActivity() {
         var pending by remember { mutableStateOf<String?>(null) }
         var flash by remember { mutableIntStateOf(0) }
         val scans = remember { mutableStateListOf<InventoryScan>() }
-        val gate = remember { ScanGate() }
+        val gate = remember { ScanGate(confirmFrames = SCAN_CONFIRM_FRAMES) }
         val asksAmount = advanced || action == InventoryAction.UPDATE
 
         fun submit(barcode: String, amount: String, unit: String) {
@@ -317,55 +301,6 @@ class InventoryActivity : ComponentActivity() {
         }
     }
 
-    /**
-     * The back camera with barcode reading on every frame. It stays bound across rotation (the
-     * screen isn't recreated); only the frames' rotation is updated.
-     */
-    @OptIn(ExperimentalGetImage::class)
-    @Composable
-    private fun BarcodeCamera(onCodes: (List<String>) -> Unit, modifier: Modifier) {
-        val context = LocalContext.current
-        val owner = LocalLifecycleOwner.current
-        val rotation = LocalConfiguration.current.orientation
-        val view = remember { PreviewView(context).apply { scaleType = PreviewView.ScaleType.FILL_CENTER } }
-        val analysis = remember {
-            ImageAnalysis.Builder().setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST).build()
-        }
-        LaunchedEffect(rotation) { view.display?.rotation?.let { analysis.targetRotation = it } }
-        DisposableEffect(owner) {
-            val scanner = BarcodeScanning.getClient(
-                BarcodeScannerOptions.Builder().setBarcodeFormats(
-                    Barcode.FORMAT_UPC_A, Barcode.FORMAT_UPC_E, Barcode.FORMAT_EAN_13, Barcode.FORMAT_EAN_8,
-                    Barcode.FORMAT_CODE_128, Barcode.FORMAT_CODE_39, Barcode.FORMAT_QR_CODE,
-                ).build(),
-            )
-            val executor = Executors.newSingleThreadExecutor()
-            analysis.setAnalyzer(executor) { frame ->
-                val image = frame.image
-                if (image == null) {
-                    frame.close()
-                    return@setAnalyzer
-                }
-                scanner.process(InputImage.fromMediaImage(image, frame.imageInfo.rotationDegrees))
-                    .addOnSuccessListener { codes -> onCodes(codes.mapNotNull { it.rawValue }) }
-                    .addOnCompleteListener { frame.close() }
-            }
-            val future = ProcessCameraProvider.getInstance(context)
-            future.addListener({
-                val provider = future.get()
-                val preview = Preview.Builder().build().also { it.surfaceProvider = view.surfaceProvider }
-                provider.unbindAll()
-                provider.bindToLifecycle(owner, CameraSelector.DEFAULT_BACK_CAMERA, preview, analysis)
-            }, ContextCompat.getMainExecutor(context))
-            onDispose {
-                runCatching { future.get().unbindAll() }
-                analysis.clearAnalyzer()
-                scanner.close()
-                executor.shutdown()
-            }
-        }
-        AndroidView(factory = { view }, modifier = modifier)
-    }
 
     @Composable
     private fun Controls(

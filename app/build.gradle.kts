@@ -79,9 +79,8 @@ dependencies {
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("androidx.work:work-runtime-ktx:2.9.1")
 
-    // Barcodes: Google's scanner screen (no camera permission needed) and reading barcodes
-    // out of photos. Both run on the phone through Google Play services.
-    implementation("com.google.android.gms:play-services-code-scanner:16.1.0")
+    // Barcodes: read on the phone through Google Play services, from the app's camera (see
+    // BarcodeCamera) and out of photos.
     implementation("com.google.android.gms:play-services-mlkit-barcode-scanning:18.3.1")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-play-services:1.9.0")
 
@@ -94,5 +93,6 @@ dependencies {
     // keyword spotting. Release AAR from github.com/k2-fsa/sherpa-onnx.
     implementation(files("libs/sherpa-onnx-2.0.1.aar"))
 
+    testImplementation("org.json:json:20240303")
     testImplementation("junit:junit:4.13.2")
 }

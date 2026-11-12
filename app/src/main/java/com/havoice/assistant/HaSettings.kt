@@ -52,6 +52,16 @@ class HaSettings(context: Context) {
         get() = prefs.getString("name_corrections", null) ?: "[]"
         set(value) = prefs.edit().putString("name_corrections", value).apply()
 
+    /** Names that joined [listenNames] because a correction was learned (not typed in by the user), one per line. */
+    var learnedNames: String
+        get() = prefs.getString("learned_names", null).orEmpty()
+        set(value) = prefs.edit().putString("learned_names", value).apply()
+
+    /** Ordinary-word mishearings seen once, waiting to see if they happen again (see [NameCorrections]). */
+    var pendingSlipsJson: String
+        get() = prefs.getString("pending_slips", null) ?: "[]"
+        set(value) = prefs.edit().putString("pending_slips", value).apply()
+
     var locationSharing: LocationSharing
         get() = prefs.getString("location_sharing", null)
             ?.let { saved -> LocationSharing.entries.firstOrNull { it.name == saved } }

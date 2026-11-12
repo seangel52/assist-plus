@@ -222,28 +222,31 @@ class HaClient(baseUrl: String, private val token: String) {
     /** Asks an AI Task entity to describe an uploaded image with [instructions]. */
     suspend fun describeImage(aiTaskEntity: String, mediaId: String, mimeType: String, instructions: String): String =
         timed(90_000, "the photo description") {
-            val id = sendCommand(
-                JSONObject()
-                    .put("type", "call_service")
-                    .put("domain", "ai_task")
-                    .put("service", "generate_data")
-                    .put(
-                        "service_data",
-                        JSONObject()
-                            .put("task_name", "Describe an attachment for Assist")
-                            .put("entity_id", aiTaskEntity)
-                            .put("instructions", instructions)
-                            .put(
-                                "attachments",
-                                JSONArray().put(JSONObject().put("media_content_id", mediaId).put("media_content_type", mimeType)),
-                            ),
-                    )
-                    .put("return_response", true),
-            )
-            val result = awaitResult(id)
-            result.optJSONObject("response")?.optStringOrNull("data")
-                ?: throw HaException("The AI didn't describe the photo")
+            aiTask(
+                aiTaskEntity,
+                "Describe an attachment for Assist",
+                instructions,
+                JSONArray().put(JSONObject().put("media_content_id", mediaId).put("media_content_type", mimeType)),
+            ) ?: throw HaException("The AI didn't describe the photo")
         }
+
+    /** A short answer from an AI Task, with nothing attached; null if it gave none. */
+    suspend fun askAiTask(aiTaskEntity: String, taskName: String, instructions: String): String? =
+        timed(30_000, "the AI task") { aiTask(aiTaskEntity, taskName, instructions, null) }
+
+    private suspend fun aiTask(entity: String, taskName: String, instructions: String, attachments: JSONArray?): String? {
+        val data = JSONObject().put("task_name", taskName).put("entity_id", entity).put("instructions", instructions)
+        attachments?.let { data.put("attachments", it) }
+        val id = sendCommand(
+            JSONObject()
+                .put("type", "call_service")
+                .put("domain", "ai_task")
+                .put("service", "generate_data")
+                .put("service_data", data)
+                .put("return_response", true),
+        )
+        return awaitResult(id).optJSONObject("response")?.optStringOrNull("data")
+    }
 
     /** A URL of [text] spoken in [pipeline]'s voice (Home Assistant caches it), or null without one. */
     suspend fun speechUrl(pipeline: Pipeline, text: String): String? = withContext(Dispatchers.IO) {

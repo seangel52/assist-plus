@@ -89,13 +89,13 @@
             android:taskAffinity="com.havoice.assistant.sheet"
             android:windowSoftInputMode="adjustResize" />
 
-        <!-- Google's barcode scanner opens as a new task; in the sheet's task it stacks on top of
-             the sheet and closing it returns there (not to Settings, the app's main task). -->
+        <!-- The paperclip's barcode scanner: in the sheet's task it stacks on top of the sheet
+             and closing it returns there (not to Settings, the app's main task). -->
         <activity
-            android:name="com.google.mlkit.vision.codescanner.internal.GmsBarcodeScanningDelegateActivity"
+            android:name=".ScanBarcodeActivity"
+            android:exported="false"
             android:taskAffinity="com.havoice.assistant.sheet"
-            android:excludeFromRecents="true"
-            tools:node="merge" />
+            android:excludeFromRecents="true" />
 
         <service
             android:name=".WakeWordService"
