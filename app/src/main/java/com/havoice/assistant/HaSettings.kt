@@ -43,24 +43,56 @@ class HaSettings(context: Context) {
             ?: NavigationApp.GOOGLE_MAPS
         set(value) = prefs.edit().putString("navigation_app", value.name).apply()
 
-    /** Names the speech recognizer leans toward, one per line (see [NameCorrections]). */
+    /** Names the user wants the speech recognizer to lean toward, one per line (see [KnownNames]). */
     var listenNames: String
         get() = prefs.getString("listen_names", null).orEmpty()
         set(value) = prefs.edit().putString("listen_names", value).apply()
 
-    var nameCorrectionsJson: String
-        get() = prefs.getString("name_corrections", null) ?: "[]"
-        set(value) = prefs.edit().putString("name_corrections", value).apply()
+    // What the app may learn and read (Settings → Learning). All off until the user turns
+    // them on: each reads or keeps something personal. Everything stays on the phone.
 
-    /** Names that joined [listenNames] because a correction was learned (not typed in by the user), one per line. */
-    var learnedNames: String
-        get() = prefs.getString("learned_names", null).orEmpty()
-        set(value) = prefs.edit().putString("learned_names", value).apply()
+    /** Learn how the owner's voice sounds in everyday requests ([VoiceMemory]). */
+    var learnVoice: Boolean
+        get() = prefs.getBoolean("learn_voice", false)
+        set(value) = prefs.edit().putBoolean("learn_voice", value).apply()
 
-    /** Ordinary-word mishearings seen once, waiting to see if they happen again (see [NameCorrections]). */
-    var pendingSlipsJson: String
-        get() = prefs.getString("pending_slips", null) ?: "[]"
-        set(value) = prefs.edit().putString("pending_slips", value).apply()
+    /** Learn names from conversations, and which names come up most ([KnownNames]). */
+    var learnNames: Boolean
+        get() = prefs.getBoolean("learn_names", false)
+        set(value) = prefs.edit().putBoolean("learn_names", value).apply()
+
+    /** Read the names of devices, areas, people and the like from Home Assistant ([NameSources]). */
+    var namesFromHome: Boolean
+        get() = prefs.getBoolean("names_from_home", false)
+        set(value) = prefs.edit().putBoolean("names_from_home", value).apply()
+
+    /** Read contacts' names (also needs Android's contacts permission). */
+    var namesFromContacts: Boolean
+        get() = prefs.getBoolean("names_from_contacts", false)
+        set(value) = prefs.edit().putBoolean("names_from_contacts", value).apply()
+
+    /** Read the names of the apps on the phone. */
+    var namesFromApps: Boolean
+        get() = prefs.getBoolean("names_from_apps", false)
+        set(value) = prefs.edit().putBoolean("names_from_apps", value).apply()
+
+    /** Keep the last conversation to show when the sheet opens again ([ConversationStore]). */
+    var rememberConversation: Boolean
+        get() = prefs.getBoolean("remember_conversation", false)
+        set(value) = prefs.edit().putBoolean("remember_conversation", value).apply()
+
+    /** When the lists of names were last read (epoch millis). */
+    var namesRefreshedAt: Long
+        get() = prefs.getLong("names_refreshed_at", 0)
+        set(value) = prefs.edit().putLong("names_refreshed_at", value).apply()
+
+    /**
+     * Removes what earlier versions kept as single "heard X, meant Y" fixes; names are learned
+     * as a weighted list now ([KnownNames]).
+     */
+    fun forgetWordFixes() {
+        prefs.edit().remove("name_corrections").remove("learned_names").remove("pending_slips").apply()
+    }
 
     var locationSharing: LocationSharing
         get() = prefs.getString("location_sharing", null)
@@ -102,7 +134,7 @@ class HaSettings(context: Context) {
 
     /** Silence (seconds) after a finished-sounding sentence before the command is sent. */
     var endPauseSeconds: Float
-        get() = prefs.getFloat("end_pause_seconds", 1.2f)
+        get() = prefs.getFloat("end_pause_seconds", 1.6f)
         set(value) = prefs.edit().putFloat("end_pause_seconds", value).apply()
 
     /**

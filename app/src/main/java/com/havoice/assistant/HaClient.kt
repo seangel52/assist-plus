@@ -187,6 +187,35 @@ class HaClient(baseUrl: String, private val token: String) {
             .filter { it.startsWith("ai_task.") }
     }
 
+    /**
+     * The names this Home Assistant has for things people talk to: areas, floors, and named
+     * entities with players' sources (see [NameSources.fromStates]).
+     */
+    suspend fun homeNames(): List<String> = timed(30_000, "Home Assistant's names") {
+        val states = awaitListResult(sendCommand(JSONObject().put("type", "get_states")))
+        val names = LinkedHashSet(NameSources.fromStates((0 until states.length()).map { states.getJSONObject(it) }))
+        for (registry in listOf("config/area_registry/list", "config/floor_registry/list")) {
+            try {
+                val list = awaitListResult(sendCommand(JSONObject().put("type", registry)))
+                for (i in 0 until list.length()) list.getJSONObject(i).optString("name").trim().takeIf { it.isNotEmpty() }?.let { names += it }
+            } catch (e: HaException) {
+                // An older Home Assistant without floors, or a login that may not read the registry.
+            }
+        }
+        names.toList()
+    }
+
+    /**
+     * Names from the user's own data, if they have made the optional script for it
+     * ([NameSources.YOURS_SCRIPT], answering `{"names": [...]}`); null when there is no such script.
+     */
+    suspend fun yourNames(): List<String>? = try {
+        val names = runScript(NameSources.YOURS_SCRIPT, JSONObject()).optJSONArray("names")
+        names?.let { list -> (0 until list.length()).map { list.optString(it).trim() }.filter { it.isNotEmpty() } }
+    } catch (e: HaException) {
+        null
+    }
+
     /** Like [awaitResult], for commands whose result is a list. */
     /** The home's latitude and longitude from Home Assistant's general settings. */
     suspend fun homeLocation(): Pair<Double, Double>? = timed(10_000, "the home location") {

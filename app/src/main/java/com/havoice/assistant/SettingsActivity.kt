@@ -80,6 +80,14 @@ class SettingsActivity : ComponentActivity() {
             finish()
             return
         }
+        // Development only: check the listener against the saved recordings (see Replay).
+        if (BuildConfig.DEBUG && intent.getBooleanExtra(Replay.EXTRA, false)) {
+            val learn = intent.getBooleanExtra(Replay.EXTRA_LEARN, false)
+            UnfinishedRequest.scope.launch { Replay.run(applicationContext, learn) }
+        }
+        if (BuildConfig.DEBUG) intent.getStringExtra(Replay.EXTRA_MODEL)?.let { name ->
+            UnfinishedRequest.scope.launch { Replay.timeModel(applicationContext, name) }
+        }
         setContent {
             HaVoiceTheme {
                 SettingsScreen(
@@ -996,12 +1004,15 @@ private fun SettingsScreen(
             HorizontalDivider()
             LocationSection(settings)
           }
-          else -> {
+          4 -> {
             NoiseSection(settings)
             HorizontalDivider()
             LogSection(settings)
             HorizontalDivider()
             TroubleshootingSection(settings)
+          }
+          5 -> LearningSection(settings)
+          else -> {
           }
           }
         }
@@ -1009,7 +1020,7 @@ private fun SettingsScreen(
     }
 }
 
-private val SETTINGS_TABS = listOf("Connection", "Listening", "Wake word", "Assistant", "Advanced")
+private val SETTINGS_TABS = listOf("Connection", "Listening", "Wake word", "Assistant", "Advanced", "Learning")
 
 /** The dictionary: names the speech recognizer leans toward, and the corrections that taught it. */
 @Composable
@@ -1041,7 +1052,9 @@ private fun DictionaryDialog(settings: HaSettings, onClose: () -> Unit) {
 @Composable
 private fun DictionaryContent(settings: HaSettings) {
     var names by remember { mutableStateOf(settings.listenNames) }
-    var corrections by remember { mutableStateOf(NameCorrections.load(settings)) }
+    val context = LocalContext.current
+    fun fromTalk() = KnownNames.inUse(KnownNames.load(context), KnownNames.today()).filter { !it.listed }.map { it.text }
+    var learned by remember { mutableStateOf(fromTalk()) }
     Text("Names to listen for", style = MaterialTheme.typography.titleMedium)
     OutlinedTextField(
         value = names,
@@ -1055,21 +1068,162 @@ private fun DictionaryContent(settings: HaSettings) {
     )
     Text(
         "One per line: people, pets, places, device names. When a word sounds like one of these, " +
-            "the speech recognizer leans toward it; a clearly different word stays as said. The " +
-            "assistant adds names here when you correct a mishearing.",
+            "the speech recognizer leans toward it; a clearly different word stays as said.",
         style = MaterialTheme.typography.bodySmall,
     )
-    if (corrections.isNotEmpty()) {
-        Text("Corrections learned", style = MaterialTheme.typography.bodyMedium)
-        corrections.forEach { c ->
-            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
-                Text("${c.heard} → ${c.meant}", modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
-                TextButton(onClick = {
-                    NameCorrections.remove(settings, c)
-                    corrections = NameCorrections.load(settings)
-                }) { Text("Remove") }
-            }
+    Text("Names picked up from conversations", style = MaterialTheme.typography.titleMedium)
+    Text(
+        "Names that are on none of your lists: the assistant used them where the recognizer had written " +
+            "something else, or you typed them. One is used once it has come up in two requests (typing " +
+            "it counts at once), and fades if it stops coming up. Removing one keeps it from coming " +
+            "back. Learned only while \"Learn names from my conversations\" is on (Learning tab).",
+        style = MaterialTheme.typography.bodySmall,
+    )
+    if (learned.isEmpty()) Text("None yet.", style = MaterialTheme.typography.bodySmall)
+    learned.forEach { name ->
+        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+            Text(name, modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
+            TextButton(onClick = {
+                KnownNames.block(context, name)
+                learned = fromTalk()
+            }) { Text("Remove") }
         }
+    }
+}
+
+/**
+ * What the app may learn and read. Each switch is off until the user turns it on, says plainly
+ * what it does, and has a way to undo it. Everything stays on the phone.
+ */
+@Composable
+private fun LearningSection(settings: HaSettings) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var learnVoice by remember { mutableStateOf(settings.learnVoice) }
+    var learnNames by remember { mutableStateOf(settings.learnNames) }
+    var fromHome by remember { mutableStateOf(settings.namesFromHome) }
+    var fromContacts by remember { mutableStateOf(settings.namesFromContacts && NameSources.contactsAllowed(context)) }
+    var fromApps by remember { mutableStateOf(settings.namesFromApps) }
+    var remember by remember { mutableStateOf(settings.rememberConversation) }
+    var voiceCount by remember { mutableIntStateOf(VoiceMemory.count(context)) }
+    var status by remember { mutableStateOf<String?>(null) }
+
+    fun readLists() {
+        status = "Reading names…"
+        scope.launch { status = withContext(Dispatchers.IO) { NameSources.refresh(context.applicationContext) } }
+    }
+    val contactsPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        fromContacts = granted
+        settings.namesFromContacts = granted
+        readLists()
+    }
+
+    Text(
+        "Assist can get better at hearing you by learning from how you use it and by reading names you " +
+            "already have. Nothing here is on until you turn it on, and all of it stays on this phone.",
+        style = MaterialTheme.typography.bodySmall,
+    )
+
+    Text("Your voice", style = MaterialTheme.typography.titleMedium)
+    LearningSwitch(
+        "Learn my everyday voice",
+        "Voice ID is set up from a few sentences read aloud; everyday speech sounds different, and gets " +
+            "turned away more. With this on, requests that clearly match your setup recordings teach it how " +
+            "you really sound. Only your setup recordings decide what is learned, so it can't drift to " +
+            "someone else. The newest ${VoiceMemory.MAX} phrases are kept, as numbers, not audio.",
+        learnVoice,
+    ) {
+        learnVoice = it
+        settings.learnVoice = it
+    }
+    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+        Text("$voiceCount phrases learned", modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
+        TextButton(enabled = voiceCount > 0, onClick = {
+            VoiceMemory.clear(context)
+            voiceCount = 0
+            AppLog.i("Learned everyday voice forgotten")
+        }) { Text("Forget") }
+    }
+    HorizontalDivider()
+
+    Text("Names", style = MaterialTheme.typography.titleMedium)
+    Text(
+        "The speech recognizer can't know your names: people, devices, brands. Given lists of them, it " +
+            "leans toward them when a word sounds like one, and the assistant is told when something " +
+            "you said sounds like a name it knows.",
+        style = MaterialTheme.typography.bodySmall,
+    )
+    LearningSwitch(
+        "Names from my Home Assistant",
+        "Reads the names of areas, devices, people, scripts and media sources from your Home Assistant, " +
+            "once a day. If you have made a script called ${NameSources.YOURS_SCRIPT} that returns names " +
+            "from your own data, those too (see the README).",
+        fromHome,
+    ) {
+        fromHome = it
+        settings.namesFromHome = it
+        readLists()
+    }
+    LearningSwitch(
+        "Names from my contacts",
+        "Reads your contacts' names (not numbers or anything else). Android will ask for permission.",
+        fromContacts,
+    ) {
+        if (it && !NameSources.contactsAllowed(context)) {
+            contactsPermission.launch(Manifest.permission.READ_CONTACTS)
+        } else {
+            fromContacts = it
+            settings.namesFromContacts = it
+            readLists()
+        }
+    }
+    LearningSwitch("Names of my apps", "Reads the names of the apps on this phone, for \"open …\".", fromApps) {
+        fromApps = it
+        settings.namesFromApps = it
+        readLists()
+    }
+    LearningSwitch(
+        "Learn names from my conversations",
+        "Notes which names come up most, and picks up names that are on none of your lists when the " +
+            "assistant uses them or you type them (see Dictionary, top right).",
+        learnNames,
+    ) {
+        learnNames = it
+        settings.learnNames = it
+    }
+    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+        Text(status ?: "", modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
+        TextButton(onClick = { readLists() }) { Text("Read again") }
+        TextButton(onClick = {
+            KnownNames.forgetLearned(context)
+            status = "Forgot the names learned from conversations."
+            AppLog.i("Names learned from conversations forgotten")
+        }) { Text("Forget learned") }
+    }
+    HorizontalDivider()
+
+    Text("Conversations", style = MaterialTheme.typography.titleMedium)
+    LearningSwitch(
+        "Remember the last conversation",
+        "Keeps the last conversation for half an hour, so opening Assist again shows the reply you " +
+            "missed, and a request still on its way when Assist closes is answered there. Not shown while " +
+            "the phone is locked.",
+        remember,
+    ) {
+        remember = it
+        settings.rememberConversation = it
+        if (!it) ConversationStore.clear(context)
+    }
+}
+
+@Composable
+private fun LearningSwitch(title: String, description: String, checked: Boolean, onChange: (Boolean) -> Unit) {
+    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.weight(1f).padding(end = 12.dp)) {
+            Text(title, style = MaterialTheme.typography.bodyLarge)
+            Text(description, style = MaterialTheme.typography.bodySmall)
+        }
+        Switch(checked = checked, onCheckedChange = onChange)
     }
 }
 
