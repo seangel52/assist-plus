@@ -9,6 +9,8 @@ import androidx.compose.ui.unit.dp
 /** The Material Design Icons used by Home Assistant's Assist sheet. */
 object MdiIcons {
     val Send = icon("mdi_send", "M2,21L23,12L2,3V10L17,12L2,14V21Z", autoMirror = true)
+    val Stop = icon("mdi_stop", "M18,18H6V6H18V18Z")
+    val TextLong = icon("mdi_text_long", "M4,5H20V7H4V5M4,9H20V11H4V9M4,13H20V15H4V13M4,17H14V19H4V17Z", autoMirror = true)
     val Microphone = icon(
         "mdi_microphone",
         "M12,2A3,3 0 0,1 15,5V11A3,3 0 0,1 12,14A3,3 0 0,1 9,11V5A3,3 0 0,1 12,2M19,11C19,14.53 " +

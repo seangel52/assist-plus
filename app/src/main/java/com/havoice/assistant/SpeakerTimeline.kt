@@ -147,20 +147,31 @@ class SignalMeter {
     private val ends = mutableListOf<Int>()
     private var samples = 0
 
+    // The raw audio itself: the words are read from it (see PhoneListener), since noise
+    // reduction, which helps tell voices apart, makes the recognizer mishear.
+    private var raw = FloatArray(MicRecorder.SAMPLE_RATE * 10)
+
     @Synchronized
     fun add(pcm: ByteArray) {
         val shorts = ByteBuffer.wrap(pcm).order(ByteOrder.LITTLE_ENDIAN).asShortBuffer()
         val n = shorts.remaining()
         if (n == 0) return
+        if (samples + n > raw.size) raw = raw.copyOf(maxOf(raw.size * 2, samples + n))
         var sum = 0.0
         for (i in 0 until n) {
             val s = shorts.get(i) / 32768.0
+            raw[samples + i] = s.toFloat()
             sum += s * s
         }
         samples += n
         levels += (10 * log10(sum / n + 1e-12)).toFloat()
         ends += samples
     }
+
+    /** Raw audio [from, to), or null when that much hasn't been heard. */
+    @Synchronized
+    fun audio(from: Int, to: Int): FloatArray? =
+        if (from < 0 || to > samples || to <= from) null else raw.copyOfRange(from, to)
 
     /**
      * How many dB the loudest half of [from, to) stands above the background (the quietest

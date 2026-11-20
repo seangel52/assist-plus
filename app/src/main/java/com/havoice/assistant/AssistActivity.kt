@@ -66,6 +66,7 @@ import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
@@ -104,6 +105,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
@@ -151,6 +153,18 @@ class AssistActivity : ComponentActivity() {
     private var currentPipeline by mutableStateOf<Pipeline?>(null)
     private var inputMode by mutableStateOf<InputMode?>(null)
     private var busy by mutableStateOf(false)
+
+    // The request on its way to Home Assistant, if any. It runs outside the sheet
+    // (UnfinishedRequest), so it can be stopped, and isn't lost if the sheet closes.
+    private class Pending(val job: Job, val outcome: CompletableDeferred<RequestOutcome>, val client: HaClient)
+    private var pending: Pending? = null
+    private var awaitingReply by mutableStateOf(false)
+
+    // Dictation: listening goes on through pauses until the mic is tapped.
+    private var dictating by mutableStateOf(false)
+
+    // When the last request or reply happened, for the saved conversation.
+    private var lastExchangeAt = 0L
 
     // Spoken PIN while locked: asked for before the first request after the sheet opens.
     private var pinVerified = false
@@ -252,6 +266,8 @@ class AssistActivity : ComponentActivity() {
         }
         // Look up the city while the user speaks; the note is cached for the request.
         lifecycleScope.launch { locationNote() }
+        restoreConversation()
+        NameSources.refreshIfDue(this)
         if (settings.isConfigured) {
             loadPipelines()
         } else {
@@ -279,6 +295,10 @@ class AssistActivity : ComponentActivity() {
                     onTextInput = ::send,
                     onMicrophone = ::toggleListening,
                     onChangeInput = ::changeInput,
+                    waiting = awaitingReply,
+                    onStop = ::stopRequest,
+                    dictating = dictating,
+                    onDictate = ::toggleDictation,
                     onOpenSettings = {
                         startActivity(Intent(this, SettingsActivity::class.java))
                         finish()
@@ -403,42 +423,26 @@ class AssistActivity : ComponentActivity() {
         }
     }
 
-    /** What the owner's bubble shows: their words, plus what was attached. */
-    /** Takes the agent's "[heard: X -> Y]" tags out of [reply] and adds those names to listen for. */
-    private fun learnNames(reply: String): String {
-        val (clean, tagged) = NameCorrections.strip(reply)
-        if (tagged.isNotEmpty()) {
-            // The agent's tag is its claim, not the user's: it counts as one sighting in the
-            // user's last request, like a finding from the review.
-            val lastSaid = messages.lastOrNull { it.isInput && !it.isPlaceholder }?.message.orEmpty()
-            NameCorrections.record(settings, tagged.map { NameCorrections.Finding(it, listOf(lastSaid), userSaidMeant = false) })
-        }
-        return clean
-    }
-
     /**
-     * In the background, reads the conversation so far for words the recognizer got wrong, so
-     * they're understood next time and listened for. Doesn't hold up the reply; a failure only
-     * means nothing was learned this turn.
+     * Learns the names in a finished exchange (see [KnownNames]): [typed] or [heard] is the
+     * request, whichever way it was made, and [tagged] are names the agent marked itself.
      */
-    private fun reviewHeard() {
-        val turns = messages.filter { !it.isPlaceholder && !it.isError && it.message != WELCOME && it.message.isNotBlank() }
-            .takeLast(HeardReview.TURNS).map { HeardReview.Turn(it.isInput, it.message) }
-        if (turns.none { it.fromUser }) return
-        lifecycleScope.launch {
-            try {
-                val entity = aiTaskEntity() ?: return@launch
-                val reply = connectedClient().askAiTask(entity, "Find misheard words for Assist", HeardReview.instructions(turns))
-                NameCorrections.record(settings, HeardReview.findings(reply.orEmpty(), turns))
-                syncLog()
-            } catch (e: HaException) {
-                AppLog.w("Couldn't review the conversation for misheard words: ${e.message}")
-            }
+    private fun learnNames(typed: String?, heard: String?, reply: String, tagged: List<String>) {
+        if (!settings.learnNames) return
+        val context = applicationContext
+        UnfinishedRequest.scope.launch {
+            val fresh = KnownNames.learn(context, HaSettings(context), typed, heard, reply, tagged)
+            if (fresh.isNotEmpty()) AppLog.i("Names picked up from conversations, now listened for: ${fresh.joinToString(", ")}")
         }
     }
 
-    /** What's known about [request]'s words from past mishearings (a hidden note), or nothing. */
-    private fun recallNote(request: String) = NameCorrections.recallNote(NameCorrections.load(settings), request)
+    /** A hidden note for the agent when [request] has words that sound like known names, or nothing. */
+    private fun namesNote(request: String): String {
+        val names = KnownNames.inUse(KnownNames.all(applicationContext, settings), KnownNames.today()).map { it.text }
+        return KnownNames.hint(request, names).also {
+            if (it.isNotEmpty()) AppLog.i("Sent with the request:${it.replace("\n", " ")}")
+        }
+    }
 
     /** The hidden location note for a request (Settings → Assistant), or nothing. */
     private suspend fun locationNote(): String {
@@ -465,6 +469,7 @@ class AssistActivity : ComponentActivity() {
         }
     }
 
+    /** What the owner's bubble shows: their words, plus what was attached. */
     private fun inputBubble(request: String): String {
         if (attachments.isEmpty()) return request
         val list = "📎 " + attachments.joinToString(", ") { it.label }
@@ -473,12 +478,139 @@ class AssistActivity : ComponentActivity() {
 
     override fun onDestroy() {
         stopIdleWake()
+        val waiting = pending?.takeIf { !it.outcome.isCompleted }
+        saveConversation(waiting = waiting != null)
         voiceJob?.cancel()
         player.stop()
         audioManager.abandonAudioFocusRequest(audioFocus)
-        client?.close()
+        if (waiting != null) {
+            // The request finishes without the sheet; its reply is saved for the next opening.
+            client = null
+            finishLater(waiting)
+        } else {
+            client?.close()
+        }
         WakeWordService.resume(this)
         super.onDestroy()
+    }
+
+    /**
+     * Shows the last conversation again if it was recent, so a reply that was missed can be read
+     * and the next request carries on from it. Not over the lock screen, where anyone holding the
+     * side button would read it.
+     */
+    private fun restoreConversation() {
+        if (!settings.rememberConversation) return
+        val saved = ConversationStore.load(this) ?: return
+        if (!saved.worthShowing(System.currentTimeMillis()) || saved.pipelineId != settings.pipelineId) return
+        if (getSystemService(KeyguardManager::class.java).isKeyguardLocked) return
+        messages.clear()
+        messages.addAll(saved.messages)
+        conversationId = saved.conversationId
+        lastExchangeAt = saved.at
+        if (!saved.waiting) return
+        val unfinished = UnfinishedRequest.outcome
+        if (unfinished == null) {
+            messages += AssistMessage(
+                "Assist closed before the reply to that came back, so I can't show how it ended. Ask me to check.",
+                isInput = false,
+                isError = true,
+            )
+            return
+        }
+        // Still on its way: wait for it here.
+        messages += AssistMessage("", isInput = false, isPlaceholder = true)
+        val index = messages.lastIndex
+        lifecycleScope.launch {
+            val result = unfinished.await()
+            if (result is RequestOutcome.Replied) conversationId = result.reply.conversationId
+            setMessage(index, replyBubble(result))
+            lastExchangeAt = System.currentTimeMillis()
+        }
+    }
+
+    /** The bubble for how a request ended, with the agent's tags taken out. */
+    private fun replyBubble(result: RequestOutcome): AssistMessage = when (result) {
+        is RequestOutcome.Replied -> {
+            val shown = ExitWords.stripEndTag(ReplyTags.stripHeard(result.reply.speech).first).first
+            AssistMessage(shown.ifBlank { "Done." }, isInput = false)
+        }
+        is RequestOutcome.Failed -> AssistMessage(result.error.message.orEmpty(), isInput = false, isError = true)
+        RequestOutcome.Stopped -> AssistMessage(STOPPED, isInput = false)
+    }
+
+    /** Saves what was said and answered, for [restoreConversation]. A spoken PIN is never among it. */
+    private fun saveConversation(waiting: Boolean = false) {
+        val said = messages.filter { !it.isPlaceholder && it.message.isNotBlank() && it.message != WELCOME && it.message != PIN_DOTS }
+        // A red notice that answers a request (it failed) is part of the conversation; one that
+        // follows a reply ("Sorry, I didn't catch that." when nothing more was said) is not.
+        val kept = said.filterIndexed { i, m -> !m.isError || said.getOrNull(i - 1)?.isInput == true }
+        // Nothing was asked this time: the earlier conversation stays as it was.
+        if (!settings.rememberConversation || lastExchangeAt == 0L || kept.none { it.isInput }) return
+        ConversationStore.save(
+            this,
+            SavedConversation(conversationId, currentPipeline?.id ?: settings.pipelineId, lastExchangeAt, kept, waiting),
+        )
+    }
+
+    /** Lets a request that is still on its way finish after the sheet has closed, and saves its reply. */
+    private fun finishLater(waiting: Pending) {
+        val context = applicationContext
+        UnfinishedRequest.outcome = waiting.outcome
+        waiting.outcome.invokeOnCompletion {
+            val result = waiting.outcome.getCompleted()
+            val bubble = replyBubble(result)
+            val conversation = (result as? RequestOutcome.Replied)?.reply?.conversationId
+            ConversationStore.finishWaiting(context, bubble, conversation, System.currentTimeMillis())
+            AppLog.i("Reply arrived after Assist closed, saved for the next opening: ${quote(bubble.message)}")
+            waiting.client.close()
+            if (UnfinishedRequest.outcome === waiting.outcome) UnfinishedRequest.outcome = null
+        }
+    }
+
+    /**
+     * Sends [message] to Home Assistant and waits for the reply; null if the user stopped it.
+     * The request runs outside the sheet (see [UnfinishedRequest]).
+     */
+    private suspend fun ask(message: String, pipeline: Pipeline?, replyIndex: Int): AssistReply? {
+        val haClient = connectedClient()
+        val outcome = CompletableDeferred<RequestOutcome>()
+        val conversation = conversationId
+        val job = UnfinishedRequest.scope.launch {
+            val result = try {
+                RequestOutcome.Replied(
+                    haClient.runIntent(message, conversation, pipeline, speak = false) { status -> showStatus(replyIndex, status) },
+                )
+            } catch (e: HaException) {
+                RequestOutcome.Failed(e)
+            }
+            outcome.complete(result)
+        }
+        pending = Pending(job, outcome, haClient)
+        awaitingReply = true
+        lastExchangeAt = System.currentTimeMillis()
+        try {
+            return when (val result = outcome.await()) {
+                is RequestOutcome.Replied -> result.reply.also { lastExchangeAt = System.currentTimeMillis() }
+                is RequestOutcome.Failed -> throw result.error
+                RequestOutcome.Stopped -> null
+            }
+        } finally {
+            awaitingReply = false
+            if (outcome.isCompleted && pending?.outcome === outcome) pending = null
+        }
+    }
+
+    /**
+     * Stops the request that is waiting for its reply. Closing the connection makes Home
+     * Assistant stop working on it; anything it had already done stays done.
+     */
+    private fun stopRequest() {
+        val waiting = pending ?: return
+        if (!waiting.outcome.complete(RequestOutcome.Stopped)) return
+        waiting.job.cancel()
+        AppLog.i("Request stopped by the user before the reply came")
+        dropConnection()
     }
 
     companion object {
@@ -486,6 +618,13 @@ class AssistActivity : ComponentActivity() {
         const val EXTRA_FROM_WAKE_WORD = "from_wake_word"
         const val EXTRA_WAKE_TOKEN = "wake_token"
         private const val EXTRA_DEBUG_REQUEST = "debug_request"
+        private const val STOPPED = "Stopped."
+        private const val PIN_DOTS = "••••"
+
+        // The last listening session, kept past the sheet closing: being turned away and then
+        // saying the same thing again teaches the voice (see VoiceMemory).
+        private var lastHeardAt = 0L
+        private var lastHeard: List<VoiceMemory.Phrase>? = null
 
         // Asks about an address at most this many times, then lets the maps app search for it.
         private const val MAX_ADDRESS_TRIES = 3
@@ -637,7 +776,26 @@ class AssistActivity : ComponentActivity() {
         continuation.invokeOnCancellation { engine?.shutdown() }
     }
 
-    private fun voiceProfile(): Voiceprint? = if (settings.voiceIdEnabled) VoiceProfile.load(this) else null
+    private fun voiceProfile(): Voiceprint? =
+        if (!settings.voiceIdEnabled) null
+        else VoiceProfile.load(this)?.let { if (settings.learnVoice) VoiceProfile.withEveryday(this, it) else it }
+
+    /** Learns the owner's everyday voice from a listening session (see [VoiceMemory]). */
+    private fun learnVoice(result: ListenResult, profile: Voiceprint?, noise: NoiseReduction) {
+        // Audio through a different noise reduction than the voiceprint's doesn't compare fairly.
+        if (!settings.learnVoice || profile == null || noise != profile.noise) return
+        val now = System.currentTimeMillis()
+        val phrases = result.segments.map { VoiceMemory.Phrase(it.preview, it.accepted, it.voice) }
+        val lessons = VoiceMemory.lessons(phrases, lastHeard, now - lastHeardAt)
+        lastHeard = phrases
+        lastHeardAt = now
+        if (lessons.isEmpty()) return
+        VoiceMemory.add(applicationContext, noise, lessons.map { it.embedding })
+        AppLog.i(
+            "Voice ID learned ${lessons.size} phrase(s): ${lessons.joinToString("; ") { it.why }} " +
+                "(${VoiceMemory.count(applicationContext)} kept)",
+        )
+    }
 
     private fun selectPipeline(pipeline: Pipeline) {
         if (pipeline.id == currentPipeline?.id) return
@@ -648,13 +806,15 @@ class AssistActivity : ComponentActivity() {
         conversationId = null
         messages.clear()
         messages += AssistMessage(WELCOME, isInput = false)
+        ConversationStore.clear(this)
+        lastExchangeAt = 0L
         usePipelineInput(pipeline, autoListen = false)
     }
 
     private fun send(text: String) {
         player.stop()
         if (awaitingPin) {
-            messages += AssistMessage("••••", isInput = true)
+            messages += AssistMessage(PIN_DOTS, isInput = true)
             lifecycleScope.launch { handlePin(text) }
             return
         }
@@ -681,15 +841,20 @@ class AssistActivity : ComponentActivity() {
         lifecycleScope.launch {
             var closing = false
             val answer = try {
-                val message = withAttachments(text) + recallNote(text) + locationNote()
-                val reply = connectedClient().runIntent(message, conversationId, currentPipeline, speak = false) { status ->
-                    showStatus(replyIndex, status)
+                val message = withAttachments(text) + namesNote(text) + locationNote()
+                val reply = ask(message, currentPipeline, replyIndex)
+                if (reply == null) {
+                    AppLog.i("Typed ${quote(text)} → stopped after ${System.currentTimeMillis() - started} ms")
+                    AssistMessage(STOPPED, isInput = false)
+                } else {
+                    conversationId = reply.conversationId
+                    val (untagged, tagged) = ReplyTags.stripHeard(reply.speech)
+                    val (shown, agentEnded) = ExitWords.stripEndTag(untagged)
+                    closing = agentEnded || exit == ExitWords.Kind.GOODBYE || openedOtherApp
+                    AppLog.i("Typed ${quote(text)} → reply in ${System.currentTimeMillis() - started} ms: ${quote(shown)}")
+                    learnNames(typed = text, heard = null, reply = shown, tagged = tagged)
+                    AssistMessage(shown.ifBlank { "Done." }, isInput = false)
                 }
-                conversationId = reply.conversationId
-                val (shown, agentEnded) = ExitWords.stripEndTag(learnNames(reply.speech))
-                closing = agentEnded || exit == ExitWords.Kind.GOODBYE || openedOtherApp
-                AppLog.i("Typed ${quote(text)} → reply in ${System.currentTimeMillis() - started} ms: ${quote(shown)}")
-                AssistMessage(shown.ifBlank { "Done." }, isInput = false)
             } catch (e: HaException) {
                 AppLog.w("Typed ${quote(text)} failed: ${e.message}")
                 dropConnection()
@@ -698,8 +863,8 @@ class AssistActivity : ComponentActivity() {
                 busy = false
             }
             setMessage(replyIndex, answer)
+            saveConversation()
             syncLog()
-            if (!answer.isError) reviewHeard()
             if (closing) {
                 // Leave the sign-off on screen for a moment before closing.
                 kotlinx.coroutines.delay(1500)
@@ -869,9 +1034,22 @@ class AssistActivity : ComponentActivity() {
         }
     }
 
+    /**
+     * The dictation button: keep listening through pauses until the mic is tapped (a long list,
+     * a note). Tapped while already listening, the words so far are kept and it simply goes on.
+     */
+    private fun toggleDictation() {
+        dictating = !dictating
+        AppLog.i(if (dictating) "Dictation on: listening until the mic is tapped" else "Dictation off")
+        if (dictating && inputMode != InputMode.VOICE_ACTIVE && interruptSpeech == null && !awaitingReply) requestListening()
+    }
+
     private fun toggleListening() {
         val speaking = interruptSpeech
-        if (speaking != null) {
+        if (awaitingReply) {
+            // Tapping the mic while waiting for the reply stops the request.
+            stopRequest()
+        } else if (speaking != null) {
             // Tapping the mic while a reply plays stops it and listens.
             speaking.complete(Unit)
         } else if (inputMode == InputMode.VOICE_ACTIVE) {
@@ -929,14 +1107,19 @@ class AssistActivity : ComponentActivity() {
                 // A spoken PIN is never shown, logged or saved.
                 val forPin = awaitingPin
                 val meter = SignalMeter()
+                val profile = voiceProfile()
                 val listener = PhoneListener(
                     applicationContext,
-                    voiceProfile(),
+                    profile,
                     threshold,
                     endPauseSeconds = settings.endPauseSeconds,
                     keepPrivate = forPin,
-                    hotwords = NameSteering.hotwords(applicationContext, NameCorrections.names(settings)),
+                    hotwords = NameSteering.hotwords(
+                        applicationContext,
+                        KnownNames.steering(KnownNames.all(applicationContext, settings), KnownNames.today()),
+                    ),
                     meter = meter,
+                    keepListening = { dictating && !forPin },
                 )
                 val capture = if (settings.saveRecordings && !forPin) Captures.Recorder() else null
                 val result = listener.listen(MicRecorder.frames(applicationContext, noise, capture, meter), stop) { live ->
@@ -947,7 +1130,9 @@ class AssistActivity : ComponentActivity() {
                 }
                 showLive = false
                 inputMode = InputMode.VOICE_INACTIVE
+                dictating = false
                 capture?.let { Captures.save(applicationContext, "assist", it, "noise $noise | ${result.details}") }
+                if (!forPin) learnVoice(result, profile, noise)
                 val command = result.command
                 if (command == null) {
                     val notice = if (forPin) "Didn't catch that. Say your PIN again." else notHeardMessage(result)
@@ -955,7 +1140,7 @@ class AssistActivity : ComponentActivity() {
                     return@launch
                 }
                 if (forPin) {
-                    setMessage(inputIndex, AssistMessage("••••", isInput = true))
+                    setMessage(inputIndex, AssistMessage(PIN_DOTS, isInput = true))
                     if (handlePin(command.text)) {
                         // Listen for the request (or another try) once this listening run has ended.
                         val thisRun = coroutineContext[Job]
@@ -995,14 +1180,19 @@ class AssistActivity : ComponentActivity() {
                 messages += AssistMessage("", isInput = false, isPlaceholder = true)
                 replyIndex = messages.lastIndex
 
-                val message = withAttachments(text) + recallNote(text) + locationNote()
+                val message = withAttachments(text) + namesNote(text) + locationNote()
                 // The reply is spoken by the app (in the pipeline's voice) rather than by the
                 // pipeline, so the agent's "[end]" tag can be taken out first.
-                val reply = connectedClient().runIntent(message, conversationId, pipeline, speak = false) { status ->
-                    showStatus(replyIndex, status)
+                val reply = ask(message, pipeline, replyIndex)
+                if (reply == null) {
+                    AppLog.i("Voice (noise $noise): sent ${quote(text)} at ${heardAt} ms, stopped at ${elapsed()} ms")
+                    setMessage(replyIndex, AssistMessage(STOPPED, isInput = false))
+                    saveConversation()
+                    return@launch
                 }
                 conversationId = reply.conversationId
-                val (spoken, agentEnded) = ExitWords.stripEndTag(learnNames(reply.speech))
+                val (untagged, tagged) = ReplyTags.stripHeard(reply.speech)
+                val (spoken, agentEnded) = ExitWords.stripEndTag(untagged)
                 val closing = agentEnded || exit == ExitWords.Kind.GOODBYE || openedOtherApp
                 AppLog.i(
                     "Voice (noise $noise): sent ${quote(text)} at ${heardAt} ms " +
@@ -1012,8 +1202,9 @@ class AssistActivity : ComponentActivity() {
                         if (closing) " [closing]" else "",
                 )
                 setMessage(replyIndex, AssistMessage(spoken.ifBlank { "Done." }, isInput = false))
+                saveConversation()
                 syncLog()
-                reviewHeard()
+                learnNames(typed = null, heard = text, reply = spoken, tagged = tagged)
                 val interrupted = pipeline.supportsSpeech && spoken.isNotBlank() && say(spoken)
                 if (interrupted) return@launch
                 if (closing) {
@@ -1037,6 +1228,7 @@ class AssistActivity : ComponentActivity() {
                 }
             } finally {
                 if (inputMode == InputMode.VOICE_ACTIVE) inputMode = InputMode.VOICE_INACTIVE
+                dictating = false
                 stopSignal = null
                 voiceJob = null
                 if (!listenAgain) {
@@ -1108,6 +1300,8 @@ class AssistActivity : ComponentActivity() {
     /** Abandons any listening or speaking in progress. */
     private fun cancelVoice() {
         stopIdleWake()
+        stopRequest()
+        dictating = false
         voiceJob?.cancel()
         voiceJob = null
         player.stop()
@@ -1213,6 +1407,10 @@ private fun AssistSheet(
     onTextInput: (String) -> Unit,
     onMicrophone: () -> Unit,
     onChangeInput: () -> Unit,
+    waiting: Boolean,
+    onStop: () -> Unit,
+    dictating: Boolean,
+    onDictate: () -> Unit,
     onOpenSettings: () -> Unit,
     onOpenInventory: () -> Unit,
     onHide: () -> Unit,
@@ -1245,6 +1443,15 @@ private fun AssistSheet(
             )
             AssistConversation(messages = messages, modifier = Modifier.weight(1f, fill = false))
             AttachmentRow(attachments, preparingAttachment, onRemoveAttachment)
+            if (dictating) {
+                Text(
+                    "Dictation: listening until you tap the mic.",
+                    style = HaText.Body,
+                    color = colors.textSecondary,
+                    modifier = Modifier.fillMaxWidth().padding(top = HaDimens.Space2),
+                    textAlign = TextAlign.Center,
+                )
+            }
             AssistSheetControls(
                 inputMode = inputMode,
                 voiceAvailable = currentPipeline != null,
@@ -1255,6 +1462,10 @@ private fun AssistSheet(
                 onTextInput = onTextInput,
                 onMicrophone = onMicrophone,
                 onChangeInput = onChangeInput,
+                waiting = waiting,
+                onStop = onStop,
+                dictating = dictating,
+                onDictate = onDictate,
             )
             Spacer(modifier = Modifier.height(HaDimens.Space2))
         }
@@ -1494,6 +1705,10 @@ private fun AssistSheetControls(
     onTextInput: (String) -> Unit,
     onMicrophone: () -> Unit,
     onChangeInput: () -> Unit,
+    waiting: Boolean,
+    onStop: () -> Unit,
+    dictating: Boolean,
+    onDictate: () -> Unit,
 ) = Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
     when (inputMode) {
         null -> Spacer(modifier = Modifier.height(HaDimens.Space16)) // pipelines still loading
@@ -1505,6 +1720,8 @@ private fun AssistSheetControls(
             onAttach = onAttach,
             onTextInput = onTextInput,
             onChangeInput = onChangeInput,
+            waiting = waiting,
+            onStop = onStop,
         )
         else -> AssistVoiceInput(
             isActive = inputMode == InputMode.VOICE_ACTIVE,
@@ -1512,6 +1729,9 @@ private fun AssistSheetControls(
             onAttach = onAttach,
             onMicrophone = onMicrophone,
             onChangeInput = onChangeInput,
+            waiting = waiting,
+            dictating = dictating,
+            onDictate = onDictate,
         )
     }
 }
@@ -1641,6 +1861,8 @@ private fun RowScope.AssistTextInput(
     onAttach: (AttachKind) -> Unit,
     onTextInput: (String) -> Unit,
     onChangeInput: () -> Unit,
+    waiting: Boolean,
+    onStop: () -> Unit,
 ) {
     val colors = LocalHaColors.current
     var text by remember { mutableStateOf("") }
@@ -1684,12 +1906,17 @@ private fun RowScope.AssistTextInput(
     )
     // As in the original: an empty field shows the microphone, typing turns it into Send.
     val showSend = text.isNotBlank() || hasAttachments || !voiceAvailable
-    HaIconButton(
-        icon = if (showSend) MdiIcons.Send else MdiIcons.Microphone,
-        contentDescription = if (showSend) "Send" else "Start listening",
-        onClick = { if (showSend) submit() else onChangeInput() },
-        enabled = if (showSend) canSend else true,
-    )
+    if (waiting) {
+        // While a request is on its way, the button stops it.
+        HaIconButton(icon = MdiIcons.Stop, contentDescription = "Stop this request", onClick = onStop)
+    } else {
+        HaIconButton(
+            icon = if (showSend) MdiIcons.Send else MdiIcons.Microphone,
+            contentDescription = if (showSend) "Send" else "Start listening",
+            onClick = { if (showSend) submit() else onChangeInput() },
+            enabled = if (showSend) canSend else true,
+        )
+    }
 }
 
 @Composable
@@ -1699,11 +1926,22 @@ private fun RowScope.AssistVoiceInput(
     onAttach: (AttachKind) -> Unit,
     onMicrophone: () -> Unit,
     onChangeInput: () -> Unit,
+    waiting: Boolean,
+    dictating: Boolean,
+    onDictate: () -> Unit,
 ) {
     AttachButton(onAttach, photosAvailable)
+    // As wide as the dictation button on the other side, so the mic stays in the middle.
+    Spacer(modifier = Modifier.width(48.dp))
     Spacer(modifier = Modifier.weight(0.5f))
-    MicrophoneButton(isActive = isActive, onClick = onMicrophone)
+    MicrophoneButton(isActive = isActive, waiting = waiting, onClick = onMicrophone)
     Spacer(modifier = Modifier.weight(0.5f))
+    HaIconButton(
+        icon = MdiIcons.TextLong,
+        contentDescription = if (dictating) "Stop dictation" else "Dictate: keep listening until I tap the mic",
+        onClick = onDictate,
+        neutral = !dictating,
+    )
     HaIconButton(
         icon = MdiIcons.KeyboardOutline,
         contentDescription = "Type a request",
@@ -1713,7 +1951,7 @@ private fun RowScope.AssistVoiceInput(
 }
 
 @Composable
-private fun MicrophoneButton(isActive: Boolean, onClick: () -> Unit) {
+private fun MicrophoneButton(isActive: Boolean, waiting: Boolean, onClick: () -> Unit) {
     val colors = LocalHaColors.current
     Box(modifier = Modifier.size(HaDimens.Space16), contentAlignment = Alignment.Center) {
         if (isActive) MicrophoneRipples()
@@ -1731,8 +1969,9 @@ private fun MicrophoneButton(isActive: Boolean, onClick: () -> Unit) {
             contentAlignment = Alignment.Center,
         ) {
             Icon(
-                imageVector = MdiIcons.Microphone,
-                contentDescription = if (isActive) "Stop listening" else "Start listening",
+                // While a request is on its way, the button stops it.
+                imageVector = if (waiting) MdiIcons.Stop else MdiIcons.Microphone,
+                contentDescription = if (waiting) "Stop this request" else if (isActive) "Stop listening" else "Start listening",
                 tint = if (isActive) colors.onPrimaryLoud else colors.textPrimary,
                 modifier = Modifier.size(28.dp),
             )

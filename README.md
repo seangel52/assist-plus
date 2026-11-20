@@ -103,6 +103,14 @@ Before this, with speech-to-text in the cloud and no voice filtering, the same s
 4. **Voice ID (recommended in a busy house):** Voice ID → **Set up my voice** (six short commands at normal distance, then three from across the room after each beep), then **Only respond to my voice**.
 5. **Wake word (optional):** Wake word → add a phrase (3+ syllables of everyday words work best), tap **Record** (five takes close, three from across the room), allow **open over other apps**. Setup shows how many close and far takes it caught. Android shows a notification while it listens.
 
+6. **Learning (optional, all off until you turn it on):** the **Learning** tab lets Assist get better at hearing you. Everything it reads or learns stays on the phone.
+   - **Learn my everyday voice:** voice ID learns how you really sound from requests that clearly match your setup recordings, so you are turned away less.
+   - **Names from my Home Assistant / contacts / apps:** the speech recognizer can't know your names (people, devices, brands). Given these lists it leans toward them when a word sounds like one, and the assistant is told when something you said sounds like a name it knows.
+   - **Learn names from my conversations:** notes which names you use most, and picks up names that are on none of your lists.
+   - **Remember the last conversation:** opening Assist again within half an hour shows the reply you missed.
+
+   **Names from your own data (optional):** if your Home Assistant has a script with the entity id `script.assist_plus_names` that responds with `{"names": ["…", "…"]}` (set a response variable with `stop:` / `response_variable:`), Assist reads those names once a day too. Use it to return names from wherever you keep them: a notes app, a purchases database, a food log. Nothing needs to be installed for this; without the script, nothing happens.
+
 The Home Assistant Companion app keeps working as before for dashboards, notifications and location — Assist Plus only replaces the assistant panel.
 
 ### Music (Spotify)
@@ -133,7 +141,7 @@ When the user is wrapping up (thanks, that's all, never mind, cancel, goodbye), 
 When you realize a name was misheard (the user corrected it, or it's clear from context), add a tag like [heard: Marlin -> Marlon] at the very end of your reply.
 ```
 
-The `[end]` tag lets the app close the assistant when the conversation is over, and `[heard: … -> …]` teaches it a name to listen for (see the Dictionary in Settings); both are removed before anything is shown or spoken.
+The `[end]` tag lets the app close the assistant when the conversation is over, and `[heard: … -> …]` counts as one use of that name (see the Learning tab and the Dictionary in Settings); both are removed before anything is shown or spoken.
 
 ## Privacy and security
 
@@ -143,7 +151,8 @@ The `[end]` tag lets the app close the assistant when the conversation is over, 
 - **Troubleshooting recordings** (Settings → Advanced) are off by default. Turned on, they keep Assist sessions and wake word clips on the phone only, to work out why it missed or misheard you.
 - **Spoken PIN** (experimental) is separate from your phone's PIN and stored only as a salted hash; three wrong tries pause it for 5 minutes. The phone itself stays locked — no app can unlock Android.
 - **Use HTTPS away from home.** Plain `http://` is allowed so local addresses work.
-- **Permissions:** microphone (listening), notifications and foreground service (wake word), display over other apps (wake word opening Assist), camera is not requested (photos use the camera app and the photo picker).
+- **Learning is opt-in.** The Learning tab's switches are off until you turn them on. What they read (names from Home Assistant, contacts, apps) and learn (your everyday voice as numbers, not audio; names; the last conversation) is kept in the app's private storage and never sent anywhere; each has a way to forget it.
+- **Permissions:** contacts (only if you turn on names from contacts), microphone (listening), notifications and foreground service (wake word), display over other apps (wake word opening Assist), camera is not requested (photos use the camera app and the photo picker).
 
 This app had a quick security review while it was built (for example, other apps can't fake a wake-word launch to open it over the lock screen), but **no professional audit**. The code is small and readable — ask Claude or another AI to review it before you install if you want a second opinion, and open an issue if you find something.
 

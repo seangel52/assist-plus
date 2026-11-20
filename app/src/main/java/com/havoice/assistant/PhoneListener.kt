@@ -22,6 +22,8 @@ data class HeardSegment(
     val how: String,
     /** The owner's words kept from this phrase, or what was heard if it was dropped. */
     val preview: String,
+    /** The voice check behind [score], for learning the owner's voice afterward; null without voice ID. */
+    val voice: HeardVoice? = null,
 )
 
 data class HeardCommand(
@@ -50,6 +52,14 @@ data class ListenResult(
  * phrase is transcribed whole (the most accurate), its words are kept by when they were said,
  * and the owner's part is then checked as a whole against the voiceprint. The command ends
  * when the owner has been quiet for the end pause, whether the room went quiet or not.
+ *
+ * Two kinds of audio are used. Voices are told apart on the noise-reduced audio, as the
+ * voiceprint was made. Words are read from the raw microphone: on the owner's saved requests
+ * noise reduction made the recognizer mishear ("protein shake" → "protein sake"). And the text that is sent is read in one pass over everything the owner
+ * said, not phrase by phrase: the recognizer leans on the words around a word, and a phrase cut
+ * off at a short pause lost them ("today" → "to day", "cat shaped mug" → "catch it's mug",
+ * "strawberry protein shake" → "strawberry pro. Protein shake"). The words shown while talking
+ * are a quick phrase-by-phrase draft of that.
  */
 class PhoneListener(
     private val context: Context,
@@ -62,8 +72,10 @@ class PhoneListener(
     private val keepPrivate: Boolean = false,
     /** Names to lean toward, one per line (NameSteering.hotwords); empty for none. */
     private val hotwords: String = "",
-    /** The raw mic's loudness, to allow for a distant voice or loud background. */
+    /** The raw mic: its loudness (to allow for a distant voice or loud background) and its audio (to read words from). */
     private val meter: SignalMeter? = null,
+    /** Dictation: while this says so, listening goes on through any pause until the button is pressed. */
+    private val keepListening: () -> Boolean = { false },
 ) {
     private val endSilenceSamples = (endPauseSeconds * RATE).toInt()
 
@@ -108,6 +120,9 @@ class PhoneListener(
         val accepted: Boolean,
         val how: String,
         val text: String,
+        /** Where in the session this phrase's words count as the owner's. */
+        val keep: List<IntRange> = emptyList(),
+        val voice: HeardVoice? = null,
     ) {
         /** The live words on screen for this phrase just before it ended, for comparing with [text] in the log. */
         var shown: String = ""
@@ -162,6 +177,7 @@ class PhoneListener(
 
         private fun endReason(speaking: Boolean): String? {
             if (stop.isCompleted) return "button"
+            if (keepListening()) return if (audio.size > MAX_DICTATION_SAMPLES) "max-length" else null
             val lastHeard = if (profile != null) timeline.lastOwnerEnd() else lastSpeechEnd
             // A phrase that just started hasn't had its voice checked yet: it may be the owner.
             val unjudged = speaking && phraseStart >= 0 && audio.size - phraseStart < FIRST_VERDICT_SAMPLES
@@ -206,12 +222,15 @@ class PhoneListener(
          */
         private fun liveWords(): String {
             if (phraseStart < 0) return ""
-            if (profile == null) return recognize(audio.copy(phraseStart, audio.size), steer = false).joinToString(" ") { it.text }
+            if (profile == null) return recognize(speech(phraseStart, audio.size), steer = false).joinToString(" ") { it.text }
             val spans = timeline.ownerSpans(phraseStart, audio.size).ifEmpty { return "" }
             val from = maxOf(phraseStart, spans.first().first - PAD_SAMPLES / 2)
             val to = minOf(audio.size, spans.last().last + 1 + PAD_SAMPLES)
-            return recognize(audio.copy(from, to), steer = false).joinToString(" ") { it.text }
+            return recognize(speech(from, to), steer = false).joinToString(" ") { it.text }
         }
+
+        /** The audio words are read from: the raw microphone, or what the listener was given if that isn't there. */
+        private fun speech(from: Int, to: Int): FloatArray = meter?.audio(from, to) ?: audio.copy(from, to)
 
         /** Treats any phrase still in progress as finished (the command ended mid-phrase). */
         fun finishSpeech() {
@@ -225,11 +244,64 @@ class PhoneListener(
 
         fun result(): ListenResult {
             val kept = phrases.filter { it.accepted }
-            val text = kept.joinToString(" ") { it.text }.trim()
+            val text = finalText(kept)
             val command = text.takeIf { it.isNotEmpty() }?.let {
                 HeardCommand(it, endReason ?: "mic-ended", soundsLikeStop = soundsLikeStop(it, kept))
             }
             return ListenResult(command, heardSegments(), logSegments(command))
+        }
+
+        /**
+         * The text to send: the owner's phrases read together, in one pass, wherever they follow
+         * each other within [READ_TOGETHER_SAMPLES] (see the class comment). Words are dropped by
+         * when they were said, only where another voice was: in a phrase that was turned away, or
+         * outside the owner's part of a shared phrase.
+         */
+        private fun finalText(kept: List<Phrase>): String {
+            val pieces = mutableListOf<String>()
+            var i = 0
+            while (i < kept.size) {
+                var j = i
+                // Not more at once than the recognizer reads well (dictation can run for minutes).
+                while (j + 1 < kept.size && kept[j + 1].start - kept[j].end <= READ_TOGETHER_SAMPLES &&
+                    kept[j + 1].end - kept[i].start <= MAX_SAMPLES
+                ) j++
+                pieces += readTogether(kept.subList(i, j + 1))
+                i = j + 1
+            }
+            return pieces.filter { it.isNotBlank() }.joinToString(" ").trim()
+        }
+
+        private fun readTogether(run: List<Phrase>): String {
+            val draft = run.joinToString(" ") { it.text }
+            // One phrase was already read whole, with the audio around it.
+            if (run.size == 1) return draft
+            val from = run.first().start
+            val to = run.last().end
+            val turnedAway = phrases.filter { !it.accepted && it.end > from && it.start < to }
+            fun owners(words: List<Word>) = words.filter { w ->
+                val phrase = run.firstOrNull { w.mid in it.start until it.end }
+                when {
+                    run.any { p -> p.keep.any { w.mid in it } } -> true
+                    // In an owner's phrase, but not in the owner's part of it.
+                    phrase != null -> false
+                    // Between phrases: the owner's, unless that's where a turned-away phrase was.
+                    else -> turnedAway.none { w.mid in it.start until it.end }
+                }
+            }.map { it.text }
+            val together = owners(transcribe(from, to))
+            val byPhrase = draft.split(' ').filter { it.isNotBlank() }
+            // A pass that lost much of what the phrases held on their own went wrong; keep the draft.
+            if (together.size < byPhrase.size * MIN_SHARE_OF_DRAFT) {
+                if (!keepPrivate) AppLog.i("Reading ${run.size} phrases together gave too little (\"${together.joinToString(" ").take(80)}\"); kept them as read one by one")
+                return draft
+            }
+            // Where the two readings differ, the noise-reduced audio has the casting vote (see Readings).
+            val settled = Readings.reconcile(together, byPhrase) { owners(transcribe(from, to, cleaned = true)) }
+            if (!keepPrivate && settled != together) {
+                AppLog.i("Readings differed: together \"${together.joinToString(" ").take(160)}\", settled as \"${settled.joinToString(" ").take(160)}\"")
+            }
+            return settled.joinToString(" ")
         }
 
         /**
@@ -295,7 +367,10 @@ class PhoneListener(
             val notOther = verdict.score == null || verdict.score > SpeakerTimeline.OTHER_MAX
             if (continues && brief && notOther) {
                 val text = transcribe(start, end).joinToString(" ") { it.text }
-                if (text.isNotBlank()) return Phrase(start, end, verdict.score, true, "you, continuing (${verdict.how})", text)
+                if (text.isNotBlank()) {
+                    val all = listOf(start - PAD_SAMPLES until end + PAD_SAMPLES)
+                    return Phrase(start, end, verdict.score, true, "you, continuing (${verdict.how})", text, all, verdict.voice)
+                }
             }
             return verdict
         }
@@ -303,15 +378,25 @@ class PhoneListener(
         private fun judgeAlone(start: Int, end: Int): Phrase {
             val words = transcribe(start, end)
             val all = words.joinToString(" ") { it.text }
-            val owner = profile ?: return Phrase(start, end, null, true, "kept", all)
+            val owner = profile ?: return Phrase(start, end, null, true, "kept", all, listOf(start - PAD_SAMPLES until end + PAD_SAMPLES))
             val spans = timeline.ownerSpans(start, end, closedEnd = true)
-            if (spans.isEmpty()) return Phrase(start, end, timeline.meanScore(start, end), false, "other", all)
+            if (spans.isEmpty()) {
+                // No stretch of it passed as the owner. The phrase as a whole is still checked, so
+                // that if the owner says it again and is accepted, their voice can be learned from it.
+                val seconds = (end - start) / RATE.toFloat()
+                val voice = VoiceProfile.match(engines, owner, audio.copy(start, end))?.let {
+                    HeardVoice(it, VoiceProfile.needed(threshold, seconds, meter?.snr(start, end)), seconds, whole = true)
+                }
+                return Phrase(start, end, timeline.meanScore(start, end), false, "other", all, voice = voice)
+            }
             val ownerAudio = spans.map { audio.copy(it.first, it.last + 1) }.reduce { a, b -> a + b }
             val seconds = ownerAudio.size / RATE.toFloat()
             val snr = meter?.snr(spans.first().first, spans.last().last + 1)
             val whole = seconds * RATE >= (end - start) * WHOLE_PHRASE
             val needed = VoiceProfile.needed(threshold, seconds, snr, isolated = whole)
-            val score = VoiceProfile.score(engines, owner, ownerAudio)
+            val match = VoiceProfile.match(engines, owner, ownerAudio)
+            val score = match?.score
+            val voice = match?.let { HeardVoice(it, needed, seconds, whole) }
             // The speech detector trims a phrase tightly, so a first or last word can sit partly
             // outside it: a stretch of the owner's speech that reaches the phrase's edge covers
             // the words read from the padding there too.
@@ -328,16 +413,21 @@ class PhoneListener(
             }
             val bar = "bar %.2f".format(needed) + (snr?.let { ", %.0f dB".format(it) } ?: "")
             if (score != null && score >= needed && kept.isNotEmpty()) {
-                return Phrase(start, end, score, true, "$part ($bar)", kept.joinToString(" ") { it.text })
+                // Which way the voice matched, when it was the everyday voice that carried it.
+                val by = match?.everyday?.takeIf { it > match.setup }?.let { ", everyday voice; setup %.2f".format(match.setup) } ?: ""
+                return Phrase(start, end, score, true, "$part ($bar$by)", kept.joinToString(" ") { it.text }, reach, voice)
             }
-            return Phrase(start, end, score, false, "not you ($bar)", kept.ifEmpty { words }.joinToString(" ") { it.text })
+            return Phrase(start, end, score, false, "not you ($bar)", kept.ifEmpty { words }.joinToString(" ") { it.text }, voice = voice)
         }
 
-        /** Words of a phrase, read with a little audio around it; positions are absolute. */
-        private fun transcribe(start: Int, end: Int): List<Word> {
+        /**
+         * Words of a phrase, read with a little audio around it; positions are absolute.
+         * [cleaned]: read the noise-reduced audio instead of the raw microphone.
+         */
+        private fun transcribe(start: Int, end: Int, cleaned: Boolean = false): List<Word> {
             val from = maxOf(0, start - PAD_SAMPLES)
             val to = minOf(audio.size, end + PAD_SAMPLES)
-            return recognize(audio.copy(from, to)).let { words ->
+            return recognize(if (cleaned) audio.copy(from, to) else speech(from, to)).let { words ->
                 words.mapIndexed { i, w ->
                     val wordStart = w.start + from
                     // A word's middle: halfway to the next word, at most a quarter second in.
@@ -382,6 +472,7 @@ class PhoneListener(
                 accepted = p.accepted,
                 how = p.how,
                 preview = p.text,
+                voice = p.voice,
             )
         }
 
@@ -461,7 +552,16 @@ class PhoneListener(
             "for", "like", "if", "then", "that", "my", "is", "are", "was", "i",
         )
 
+        /** The owner's phrases this close together are read in one pass for the text that is sent. */
+        private const val READ_TOGETHER_SAMPLES = RATE * 3
+
+        /** Reading phrases together must give at least this share of the words they held one by one. */
+        private const val MIN_SHARE_OF_DRAFT = 0.6f
+
         private const val NO_SPEECH_SAMPLES = RATE * 8
         private const val MAX_SAMPLES = RATE * 30
+
+        /** Dictation stops by itself after this long, in case the button is never pressed. */
+        private const val MAX_DICTATION_SAMPLES = RATE * 300
     }
 }
